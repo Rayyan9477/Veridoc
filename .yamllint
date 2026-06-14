@@ -1,0 +1,50 @@
+# Yamllint config — tuned for GitHub Actions workflows + general
+# repo YAML. Rules chosen to match the GitHub Actions community
+# convention (long `run:` shell lines, unquoted `on:` trigger key,
+# no `---` doc start in workflows). Override on a per-file basis
+# if a future file needs strict mode.
+extends: default
+
+ignore: |
+  .playwright-mcp/
+  node_modules/
+  .next/
+  .venv/
+  venv/
+  env/
+  output/
+
+rules:
+  # GitHub Actions ships workflows without a `---` document start;
+  # treating its absence as a warning produces noise on every file.
+  document-start:
+    present: false
+
+  # The GitHub Actions trigger key is the literal `on:` (unquoted) —
+  # YAML 1.1 parses that as a boolean, which yamllint flags as
+  # "truthy". The convention is unquoted; the GitHub parser does the
+  # right thing. Allow the workflow files to use it.
+  truthy:
+    check-keys: false
+    allowed-values: ["true", "false"]
+
+  # Comments and `run:` shell pipelines for CI commonly exceed 80.
+  # 140 keeps real readability problems caught but stops penalising
+  # multi-flag pytest invocations and inline error messages.
+  line-length:
+    max: 140
+    level: warning
+
+  # Default 2-space indent is fine; document explicitly so a future
+  # contributor doesn't reach for 4.
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+
+  # Comments without a leading space ("#foo") are mildly annoying;
+  # warning-level is enough.
+  comments:
+    min-spaces-from-content: 1
+    require-starting-space: true
+
+  comments-indentation: disable

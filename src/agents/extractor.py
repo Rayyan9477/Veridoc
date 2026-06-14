@@ -1,0 +1,1789 @@
+"""
+Extractor Agent for dual-pass document data extraction.
+
+Responsible for:
+- Schema-driven field extraction
+- Dual-pass extraction for verification
+- Per-field confidence scoring
+- Field-by-field comparison and merging
+"""
+
+import time
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from src.agents.base import AgentResult, BaseAgent, ExtractionError
+from src.agents.utils import (
+    RetryConfig,
+    build_custom_schema,
+    retry_with_backoff,
+)
+from src.client.lm_client import LMStudioClient
+from src.config import get_logger, get_settings
+from src.pipeline.state import (
+    BoundingBoxCoords,
+    ExtractionState,
+    ExtractionStatus,
+    FieldMetadata,
+    PageExtraction,
+    serialize_field_metadata,
+    serialize_page_extraction,
+    set_status,
+    update_state,
+)
+from src.prompts.extraction import (
+    build_extraction_prompt,
+    build_verification_prompt,
+)
+
+
+# ---------------------------------------------------------------------------
+# V3 Phase 1 — permissive extraction-result schema for constrained decoding
+# ---------------------------------------------------------------------------
+
+
+class _ExtractionEnvelope(BaseModel):
+    """Permissive JSON-object envelope for extractor VLM calls.
+
+    The extractor's response shape is field-set-dependent (CMS-1500 has
+    different fields from a generic invoice) so a strict per-field
+    schema would couple the constrained-decode wrapper to every active
+    schema in the registry. Instead, Phase 1 binds a permissive
+    "the response must be a JSON object" schema — sufficient to
+    eliminate the malformed-JSON failure class while leaving field
+    shapes for Phase 2's dual-VLM EXTRACTOR / AUDITOR schemas to
+    enumerate strictly.
+
+    ``model_config`` allows arbitrary extra keys so the document-type
+    field set (which we don't redeclare here) survives the round-trip.
+    """
+
+    model_config = ConfigDict(extra="allow")
+from src.prompts.grounding_rules import (
+    build_enhanced_system_prompt,
+    build_grounded_system_prompt,
+)
+from src.schemas import DocumentSchema, FieldDefinition, SchemaRegistry
+from src.validation import ComparisonResult, DualPassComparator, MergeStrategy
+
+
+logger = get_logger(__name__)
+
+
+class ExtractorAgent(BaseAgent):
+    """
+    Dual-pass extraction agent for document data extraction.
+
+    Performs two extraction passes on each page:
+    - Pass 1: Standard extraction focusing on completeness
+    - Pass 2: Verification extraction focusing on accuracy
+
+    Results are compared field-by-field to calculate confidence
+    and flag potential discrepancies.
+
+    VLM Calls: 2 per page (dual-pass)
+    """
+
+    def __init__(
+        self,
+        client: LMStudioClient | None = None,
+        agreement_confidence_boost: float = 0.1,
+        disagreement_confidence_penalty: float = 0.3,
+        prompt_enhancer: Any | None = None,
+    ) -> None:
+        """
+        Initialize the Extractor agent.
+
+        Args:
+            client: Optional pre-configured LM Studio client.
+            agreement_confidence_boost: Confidence boost when passes agree.
+            disagreement_confidence_penalty: Confidence penalty when passes disagree.
+            prompt_enhancer: Optional DynamicPromptEnhancer for correction-based
+                prompt enrichment (Phase 3B).
+        """
+        super().__init__(name="extractor", client=client)
+        self._schema_registry = SchemaRegistry()
+        self._agreement_boost = agreement_confidence_boost
+        self._disagreement_penalty = disagreement_confidence_penalty
+        self._prompt_enhancer = prompt_enhancer
+        # Domain-specific merge strategies for medical document fields
+        # Diagnosis codes and financial amounts: require agreement (wrong is worse than missing)
+        # Names and addresses: prefer longer value (truncation is common VLM failure)
+        _medical_field_strategies = {
+            # Diagnosis codes — wrong code is dangerous
+            "diagnosis_code_a": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_b": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_c": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_d": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_e": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_f": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_g": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_h": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_i": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_j": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_k": MergeStrategy.REQUIRE_AGREEMENT,
+            "diagnosis_code_l": MergeStrategy.REQUIRE_AGREEMENT,
+            "cpt_code": MergeStrategy.REQUIRE_AGREEMENT,
+            # Financial amounts — discrepancies are high-risk
+            "total_charges": MergeStrategy.REQUIRE_AGREEMENT,
+            "amount_paid": MergeStrategy.REQUIRE_AGREEMENT,
+            "amount_due": MergeStrategy.REQUIRE_AGREEMENT,
+            "balance_due": MergeStrategy.REQUIRE_AGREEMENT,
+            "outside_lab_charges": MergeStrategy.REQUIRE_AGREEMENT,
+            # Identifiers — must be exact
+            "npi": MergeStrategy.REQUIRE_AGREEMENT,
+            "federal_tax_id": MergeStrategy.REQUIRE_AGREEMENT,
+            "insurance_id": MergeStrategy.REQUIRE_AGREEMENT,
+            # Names and addresses — prefer longer (truncation is common)
+            "patient_name": MergeStrategy.PREFER_LONGER,
+            "insured_name": MergeStrategy.PREFER_LONGER,
+            "other_insured_name": MergeStrategy.PREFER_LONGER,
+            "referring_provider_name": MergeStrategy.PREFER_LONGER,
+            "facility_name": MergeStrategy.PREFER_LONGER,
+            "billing_provider_name": MergeStrategy.PREFER_LONGER,
+            "patient_address": MergeStrategy.PREFER_LONGER,
+            "insured_address": MergeStrategy.PREFER_LONGER,
+            "facility_address": MergeStrategy.PREFER_LONGER,
+            "billing_provider_address": MergeStrategy.PREFER_LONGER,
+        }
+        self._dual_pass_comparator = DualPassComparator(
+            field_strategies=_medical_field_strategies,
+        )
+
+    def process(self, state: ExtractionState) -> ExtractionState:
+        """
+        Extract data from all pages using dual-pass strategy.
+
+        This is the main entry point for the LangGraph workflow.
+        
+        Routes to either adaptive (VLM-first) or legacy (schema-based) extraction.
+
+        Args:
+            state: Current extraction state.
+
+        Returns:
+            Updated state with extraction results.
+        """
+        # Reset metrics to prevent accumulation across documents
+        self.reset_metrics()
+
+        # Check if using VLM-first adaptive extraction
+        use_adaptive = state.get("use_adaptive_extraction", False)
+        has_adaptive_schema = state.get("adaptive_schema") is not None
+
+        if use_adaptive and has_adaptive_schema:
+            self._logger.info(
+                "using_adaptive_extraction",
+                processing_id=state.get("processing_id", ""),
+            )
+            return self._process_adaptive(state)
+        self._logger.info(
+            "using_legacy_extraction",
+            processing_id=state.get("processing_id", ""),
+        )
+        return self._process_legacy(state)
+
+    def _process_legacy(self, state: ExtractionState) -> ExtractionState:
+        """
+        Legacy extraction using hardcoded schemas (backward compatibility).
+        
+        Args:
+            state: Current extraction state.
+        
+        Returns:
+            Updated state with extraction results.
+        """
+        start_time = self.log_operation_start(
+            "dual_pass_extraction",
+            processing_id=state.get("processing_id", ""),
+            page_count=len(state.get("page_images", [])),
+        )
+
+        try:
+            # Update status
+            state = set_status(state, ExtractionStatus.EXTRACTING, "extracting")
+
+            # Get schema for extraction
+            schema = self._get_schema(state)
+            if not schema:
+                raise ExtractionError(
+                    "No schema available for extraction",
+                    agent_name=self.name,
+                    recoverable=False,
+                )
+
+            # Get page images
+            page_images = state.get("page_images", [])
+            if not page_images:
+                raise ExtractionError(
+                    "No page images available for extraction",
+                    agent_name=self.name,
+                    recoverable=False,
+                )
+
+            # Extract structure context from analyzer results for prompt enrichment
+            analysis = state.get("analysis", {})
+            structure_context = {
+                "has_tables": analysis.get("has_tables", False),
+                "table_count": analysis.get("table_count", 0),
+                "has_handwriting": analysis.get("has_handwriting", False),
+                "has_signatures": analysis.get("has_signatures", False),
+                "layout_type": analysis.get("layout_type", ""),
+                "text_density": analysis.get("text_density", ""),
+                "detected_structures": analysis.get("detected_structures", []),
+                "regions_of_interest": analysis.get("regions_of_interest", []),
+            } if analysis else None
+
+            # Extract from each page
+            page_extractions: list[dict[str, Any]] = []
+            total_vlm_calls = 0
+
+            # V3 Phase 5: profile flows from analyzer through state.
+            # When unset (legacy callers / pre-Phase-5 checkpoints) we
+            # default to ``None`` and the prompt builder skips the
+            # profile section.
+            profile_name = state.get("profile") or None
+
+            for page_data in page_images:
+                page_result = self._extract_page(
+                    page_data=page_data,
+                    schema=schema,
+                    document_type=state.get("document_type", "OTHER"),
+                    total_pages=len(page_images),
+                    structure_context=structure_context,
+                    profile=profile_name,
+                )
+                page_extractions.append(serialize_page_extraction(page_result))
+                total_vlm_calls += page_result.vlm_calls
+
+            # Merge results from all pages
+            merged_extraction = self._merge_page_extractions(page_extractions, schema)
+
+            # Build field metadata
+            field_metadata = self._build_field_metadata(merged_extraction)
+
+            # Calculate processing time
+            duration_ms = self.log_operation_complete(
+                "dual_pass_extraction",
+                start_time,
+                success=True,
+                pages_extracted=len(page_extractions),
+                vlm_calls=total_vlm_calls,
+            )
+
+            # Update state
+            state = update_state(
+                state,
+                {
+                    "page_extractions": page_extractions,
+                    "merged_extraction": merged_extraction,
+                    "field_metadata": {
+                        k: serialize_field_metadata(v) for k, v in field_metadata.items()
+                    },
+                    "status": ExtractionStatus.EXTRACTING.value,
+                    "current_step": "extraction_complete",
+                    "total_vlm_calls": state.get("total_vlm_calls", 0) + total_vlm_calls,
+                    "total_processing_time_ms": (
+                        state.get("total_processing_time_ms", 0) + duration_ms
+                    ),
+                },
+            )
+
+            return state
+
+        except ExtractionError:
+            raise
+        except Exception as e:
+            self.log_operation_complete("dual_pass_extraction", start_time, success=False)
+            raise ExtractionError(
+                f"Extraction failed: {e}",
+                agent_name=self.name,
+                recoverable=True,
+            ) from e
+
+    def _process_adaptive(self, state: ExtractionState) -> ExtractionState:
+        """
+        Adaptive zero-shot extraction using VLM-first pipeline.
+        
+        Uses layout analysis, component detection, and adaptive schema
+        for structure-aware extraction without hardcoded templates.
+        
+        Args:
+            state: Current extraction state with VLM-first analysis.
+        
+        Returns:
+            Updated state with extraction results.
+        """
+        start_time = self.log_operation_start(
+            "adaptive_extraction",
+            processing_id=state.get("processing_id", ""),
+            page_count=len(state.get("page_images", [])),
+        )
+
+        try:
+            # Update status
+            state = set_status(state, ExtractionStatus.EXTRACTING, "adaptive_extracting")
+
+            # Get VLM-first analysis
+            adaptive_schema = state.get("adaptive_schema")
+            layout_analyses = state.get("layout_analyses", [])
+            component_maps = state.get("component_maps", [])
+
+            if not adaptive_schema:
+                raise ExtractionError(
+                    "No adaptive schema available for extraction",
+                    agent_name=self.name,
+                    recoverable=False,
+                )
+
+            # Get page images
+            page_images = state.get("page_images", [])
+            if not page_images:
+                raise ExtractionError(
+                    "No page images available for extraction",
+                    agent_name=self.name,
+                    recoverable=False,
+                )
+
+            # Retry-aware extraction: vary temperature on retries to get different
+            # VLM outputs instead of repeating the exact same extraction.
+            retry_count = state.get("retry_count", 0)
+
+            self._logger.info(
+                "adaptive_extraction_started",
+                pages=len(page_images),
+                fields=adaptive_schema.get("total_field_count", 0),
+                strategy=adaptive_schema.get("overall_strategy", "unknown"),
+                retry_count=retry_count,
+            )
+
+            # Extract from each page using adaptive strategy
+            page_extractions: list[dict[str, Any]] = []
+            total_vlm_calls = 0
+
+            for idx, page_data in enumerate(page_images):
+                page_number = page_data.get("page_number", idx + 1)
+
+                # Get corresponding layout and components for this page
+                layout = None
+                components = None
+
+                for la in layout_analyses:
+                    if la.get("page_number") == page_number:
+                        layout = la
+                        break
+
+                for cm in component_maps:
+                    if cm.get("page_number") == page_number:
+                        components = cm
+                        break
+
+                # Extract page with full context
+                page_result = self._extract_page_adaptive(
+                    page_data=page_data,
+                    adaptive_schema=adaptive_schema,
+                    layout=layout,
+                    components=components,
+                    page_number=page_number,
+                    total_pages=len(page_images),
+                    retry_count=retry_count,
+                )
+
+                page_extractions.append(serialize_page_extraction(page_result))
+                total_vlm_calls += page_result.vlm_calls
+
+                self._logger.debug(
+                    "page_extracted_adaptive",
+                    page_number=page_number,
+                    fields_extracted=len(page_result.merged_fields),
+                    confidence=page_result.overall_confidence,
+                )
+
+            # Merge results from all pages
+            merged_extraction = self._merge_page_extractions_adaptive(
+                page_extractions, adaptive_schema
+            )
+
+            # Build field metadata
+            field_metadata = self._build_field_metadata(merged_extraction)
+
+            # Calculate processing time
+            duration_ms = self.log_operation_complete(
+                "adaptive_extraction",
+                start_time,
+                success=True,
+                pages_extracted=len(page_extractions),
+                vlm_calls=total_vlm_calls,
+            )
+
+            # Update state
+            state = update_state(
+                state,
+                {
+                    "page_extractions": page_extractions,
+                    "merged_extraction": merged_extraction,
+                    "field_metadata": {
+                        k: serialize_field_metadata(v) for k, v in field_metadata.items()
+                    },
+                    "status": ExtractionStatus.EXTRACTING.value,
+                    "current_step": "adaptive_extraction_complete",
+                    "total_vlm_calls": state.get("total_vlm_calls", 0) + total_vlm_calls,
+                    "total_processing_time_ms": (
+                        state.get("total_processing_time_ms", 0) + duration_ms
+                    ),
+                },
+            )
+
+            self._logger.info(
+                "adaptive_extraction_completed",
+                total_fields=len(field_metadata),
+                total_vlm_calls=total_vlm_calls,
+                duration_ms=duration_ms,
+            )
+
+            return state
+
+        except ExtractionError:
+            raise
+        except Exception as e:
+            self.log_operation_complete("adaptive_extraction", start_time, success=False)
+            raise ExtractionError(
+                f"Adaptive extraction failed: {e}",
+                agent_name=self.name,
+                recoverable=True,
+            ) from e
+
+    def _extract_page_adaptive(
+        self,
+        page_data: dict[str, Any],
+        adaptive_schema: dict[str, Any],
+        layout: dict[str, Any] | None,
+        components: dict[str, Any] | None,
+        page_number: int,
+        total_pages: int,
+        retry_count: int = 0,
+    ) -> PageExtraction:
+        """
+        Extract data from a single page using adaptive schema and context.
+
+        Performs dual-pass extraction with full layout and component context.
+        On retries, temperature is increased to get varied VLM outputs.
+
+        Args:
+            page_data: Page image data.
+            adaptive_schema: VLM-generated adaptive schema.
+            layout: Layout analysis for this page.
+            components: Component map for this page.
+            page_number: Current page number.
+            total_pages: Total page count.
+            retry_count: Current pipeline retry attempt (0 = first try).
+
+        Returns:
+            PageExtraction with merged dual-pass results.
+        """
+        image_data_uri = page_data.get("data_uri")
+        if not image_data_uri:
+            raise ExtractionError(
+                f"No image data for page {page_number}",
+                agent_name=self.name,
+                recoverable=False,
+            )
+
+        # Build field definitions from adaptive schema
+        field_defs = adaptive_schema.get("fields", [])
+        document_desc = adaptive_schema.get("document_type_description", "unknown document")
+
+        # Pass 1: Structure-aware extraction (completeness focus)
+        pass1_start = time.time()
+        pass1_result = self._extract_page_pass_adaptive(
+            image_data=image_data_uri,
+            field_defs=field_defs,
+            document_desc=document_desc,
+            layout=layout,
+            components=components,
+            page_number=page_number,
+            total_pages=total_pages,
+            is_first_pass=True,
+            retry_count=retry_count,
+        )
+        pass1_time = int((time.time() - pass1_start) * 1000)
+
+        # Pass 2: Verification pass (accuracy focus)
+        pass2_start = time.time()
+        pass2_result = self._extract_page_pass_adaptive(
+            image_data=image_data_uri,
+            field_defs=field_defs,
+            document_desc=document_desc,
+            layout=layout,
+            components=components,
+            page_number=page_number,
+            total_pages=total_pages,
+            is_first_pass=False,
+            retry_count=retry_count,
+        )
+        pass2_time = int((time.time() - pass2_start) * 1000)
+
+        # Merge results using dual-pass comparator
+        pass1_fields = pass1_result.get("fields", {})
+        pass2_fields = pass2_result.get("fields", {})
+
+        merged_fields = self._merge_pass_results(pass1_fields, pass2_fields, page_number)
+
+        # Create PageExtraction
+        page_extraction = PageExtraction(
+            page_number=page_number,
+            pass1_raw=pass1_result,
+            pass2_raw=pass2_result,
+            merged_fields=merged_fields,
+            extraction_time_ms=pass1_time + pass2_time,
+            vlm_calls=2,  # Dual-pass
+            errors=[],
+        )
+
+        return page_extraction
+
+    _MAX_FIELDS_PER_PROMPT = 25
+    _CRITICAL_FIELD_KEYWORDS = (
+        "id", "number", "code", "mrn", "ssn",
+        "date", "dob", "amount", "charge", "total", "balance",
+    )
+
+    @staticmethod
+    def _chunk_field_defs(
+        field_defs: list[dict[str, Any]],
+        max_per_chunk: int,
+    ) -> list[list[dict[str, Any]]]:
+        """Split field definitions into priority-ordered chunks.
+
+        Critical fields (identifiers, dates, amounts) go in the first chunk.
+        Remaining fields are distributed evenly across subsequent chunks.
+        """
+        if len(field_defs) <= max_per_chunk:
+            return [field_defs]
+
+        critical = []
+        other = []
+        for f in field_defs:
+            name_lower = (f.get("field_name") or f.get("name") or "").lower()
+            if any(kw in name_lower for kw in ExtractorAgent._CRITICAL_FIELD_KEYWORDS):
+                critical.append(f)
+            else:
+                other.append(f)
+
+        chunks: list[list[dict[str, Any]]] = []
+
+        # First chunk: critical fields, then fill remaining capacity
+        first_chunk = list(critical)
+        remaining_capacity = max_per_chunk - len(first_chunk)
+        if remaining_capacity > 0 and other:
+            first_chunk.extend(other[:remaining_capacity])
+            other = other[remaining_capacity:]
+        chunks.append(first_chunk)
+
+        # Distribute remaining into balanced chunks
+        while other:
+            chunk_size = min(max_per_chunk, len(other))
+            chunks.append(other[:chunk_size])
+            other = other[chunk_size:]
+
+        return [c for c in chunks if c]
+
+    def _extract_page_pass_adaptive(
+        self,
+        image_data: str,
+        field_defs: list[dict[str, Any]],
+        document_desc: str,
+        layout: dict[str, Any] | None,
+        components: dict[str, Any] | None,
+        page_number: int,
+        total_pages: int,
+        is_first_pass: bool,
+        retry_count: int = 0,
+    ) -> dict[str, Any]:
+        """
+        Perform single extraction pass with full VLM context.
+
+        For schemas with more fields than _MAX_FIELDS_PER_PROMPT, splits
+        into priority-ordered chunks and merges results across VLM calls.
+
+        Args:
+            image_data: Base64-encoded image.
+            field_defs: Adaptive field definitions.
+            document_desc: Document type description.
+            layout: Layout analysis context.
+            components: Component map context.
+            page_number: Current page number.
+            total_pages: Total pages.
+            is_first_pass: Whether this is pass 1 or 2.
+            retry_count: Pipeline retry attempt (0 = first try).
+
+        Returns:
+            Extraction result dictionary.
+        """
+        # Chunk large schemas to avoid silently dropping fields
+        chunks = self._chunk_field_defs(field_defs, self._MAX_FIELDS_PER_PROMPT)
+        if len(chunks) > 1:
+            self._logger.info(
+                "field_chunking_applied",
+                total_fields=len(field_defs),
+                chunks=len(chunks),
+                fields_per_chunk=[len(c) for c in chunks],
+                page_number=page_number,
+                is_first_pass=is_first_pass,
+            )
+            merged_fields: dict[str, Any] = {}
+            for chunk in chunks:
+                chunk_result = self._extract_single_chunk_adaptive(
+                    image_data=image_data,
+                    field_defs=chunk,
+                    document_desc=document_desc,
+                    layout=layout,
+                    components=components,
+                    page_number=page_number,
+                    total_pages=total_pages,
+                    is_first_pass=is_first_pass,
+                    retry_count=retry_count,
+                )
+                chunk_fields = chunk_result.get("fields", {})
+                merged_fields.update(chunk_fields)
+            return {"fields": merged_fields}
+
+        return self._extract_single_chunk_adaptive(
+            image_data=image_data,
+            field_defs=field_defs,
+            document_desc=document_desc,
+            layout=layout,
+            components=components,
+            page_number=page_number,
+            total_pages=total_pages,
+            is_first_pass=is_first_pass,
+            retry_count=retry_count,
+        )
+
+    def _extract_single_chunk_adaptive(
+        self,
+        image_data: str,
+        field_defs: list[dict[str, Any]],
+        document_desc: str,
+        layout: dict[str, Any] | None,
+        components: dict[str, Any] | None,
+        page_number: int,
+        total_pages: int,
+        is_first_pass: bool,
+        retry_count: int = 0,
+    ) -> dict[str, Any]:
+        """
+        Perform single extraction VLM call for one chunk of fields.
+
+        Args:
+            image_data: Base64-encoded image.
+            field_defs: Chunk of field definitions (already sized).
+            document_desc: Document type description.
+            layout: Layout analysis context.
+            components: Component map context.
+            page_number: Current page number.
+            total_pages: Total pages.
+            is_first_pass: Whether this is pass 1 or 2.
+            retry_count: Pipeline retry attempt (0 = first try).
+
+        Returns:
+            Extraction result dictionary.
+        """
+        # Build structure-aware system prompt
+        system_prompt = self._build_adaptive_system_prompt(
+            document_desc=document_desc,
+            is_verification=not is_first_pass,
+        )
+
+        # Build structure-aware extraction prompt
+        user_prompt = self._build_adaptive_extraction_prompt(
+            field_defs=field_defs,
+            document_desc=document_desc,
+            layout=layout,
+            components=components,
+            page_number=page_number,
+            total_pages=total_pages,
+            is_first_pass=is_first_pass,
+        )
+
+        # On retries, add differentiation so the VLM produces varied outputs
+        # instead of repeating the exact same extraction.
+        temperature = 0.1
+        if retry_count > 0:
+            # Increase temperature: 0.1 → 0.2 → 0.3 (capped at 0.4)
+            temperature = min(0.1 + retry_count * 0.15, 0.6)
+            user_prompt += (
+                f"\n\n**RETRY ATTEMPT {retry_count}**: Previous extraction "
+                f"scored below threshold. Pay extra attention to:\n"
+                f"- Fields you may have missed\n"
+                f"- Values that were partially visible or ambiguous\n"
+                f"- Table rows that may span multiple lines\n"
+                f"- Small text or annotations you may have overlooked\n"
+            )
+
+        # Phase 3B: Enhance prompt with correction history warnings
+        if self._prompt_enhancer is not None:
+            field_names = [f.get("field_name", "") for f in field_defs if f.get("field_name")]
+            try:
+                enhancement = self._prompt_enhancer.enhance_prompt(
+                    base_prompt=user_prompt,
+                    field_names=field_names,
+                    document_type=document_desc,
+                )
+                user_prompt = enhancement.enhanced_prompt
+            except Exception as enh_err:
+                self._logger.warning(
+                    "adaptive_prompt_enhancement_failed",
+                    error=str(enh_err),
+                )
+
+        # Retry with backoff
+        settings = get_settings()
+        retry_config = RetryConfig(
+            max_retries=settings.extraction.max_retries,
+            base_delay_ms=500,
+            max_delay_ms=settings.agent.max_retry_delay_ms,
+        )
+
+        def make_vlm_call() -> dict[str, Any]:
+            # V3 Phase 1: schema-bound call. The permissive envelope
+            # eliminates the malformed-JSON class without forcing every
+            # registered DocumentSchema to be re-expressed as a strict
+            # Pydantic model — that's the Phase 2 job.
+            payload, _trace = self.send_vision_request_with_schema(
+                image_data=image_data,
+                prompt=user_prompt,
+                schema=_ExtractionEnvelope,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=6000,
+            )
+            return payload
+
+        try:
+            return retry_with_backoff(
+                func=make_vlm_call,
+                config=retry_config,
+                on_retry=lambda attempt, e: self._logger.warning(
+                    "adaptive_extraction_retry",
+                    page_number=page_number,
+                    pass_number=1 if is_first_pass else 2,
+                    attempt=attempt + 1,
+                    error=str(e),
+                ),
+            )
+        except Exception as e:
+            self._logger.warning(
+                "adaptive_extraction_pass_failed",
+                page_number=page_number,
+                pass_number=1 if is_first_pass else 2,
+                error=str(e),
+            )
+            return {"fields": {}, "error": str(e)}
+
+    def _build_adaptive_system_prompt(
+        self,
+        document_desc: str,
+        is_verification: bool,
+    ) -> str:
+        """Build system prompt for adaptive extraction."""
+        mode = "VERIFICATION" if is_verification else "EXTRACTION"
+
+        return f"""You are an expert document data extractor specializing in zero-shot extraction.
+
+DOCUMENT TYPE: {document_desc}
+
+MODE: {mode} Pass
+
+You have full context about this document's structure:
+- Layout analysis (regions, reading order, visual marks)
+- Component detection (tables, forms, checkboxes, key-value pairs)
+- Adaptive schema (fields proposed based on structure)
+
+CRITICAL INSTRUCTIONS:
+
+1. **Use Structural Context**: Leverage layout and component information to guide extraction
+2. **Respect Component Types**: Extract tables row-by-row, forms field-by-field, checkboxes by state
+3. **Visual Mark Detection**: Pay attention to checkmarks, ticks, crosses in checkboxes
+4. **Spatial Validation**: Values should be in expected regions based on layout
+5. **Confidence Scoring**: Be honest about uncertainty, especially for handwriting
+6. **Anti-Hallucination**: Return null for unclear values, do NOT guess
+
+{'VERIFICATION MODE: You are a skeptical auditor. Verify each value independently.' if is_verification else 'EXTRACTION MODE: Focus on completeness. Extract all visible values.'}
+
+Return structured JSON with extracted fields, confidences, and locations."""
+
+    def _build_adaptive_extraction_prompt(
+        self,
+        field_defs: list[dict[str, Any]],
+        document_desc: str,
+        layout: dict[str, Any] | None,
+        components: dict[str, Any] | None,
+        page_number: int,
+        total_pages: int,
+        is_first_pass: bool,
+    ) -> str:
+        """Build extraction prompt with full structural context."""
+
+        # Build context sections
+        layout_context = "No layout analysis available"
+        if layout:
+            visual_marks = layout.get("visual_marks", [])
+            mark_summary = {}
+            for mark in visual_marks:
+                mtype = mark.get("mark_type", "unknown")
+                mark_summary[mtype] = mark_summary.get(mtype, 0) + 1
+
+            layout_context = f"""
+**Layout Structure:**
+- Type: {layout.get('layout_type', 'unknown')}
+- Reading Order: {layout.get('reading_order', 'unknown')}
+- Columns: {layout.get('column_count', 1)}
+- Density: {layout.get('density_estimate', 'unknown')}
+- Handwriting: {"Yes" if layout.get('has_handwritten_content') else "No"}
+
+**Visual Marks Detected:** {len(visual_marks)}
+"""
+            for mtype, count in sorted(mark_summary.items()):
+                layout_context += f"  - {mtype}: {count}\n"
+
+        component_context = "No component analysis available"
+        if components:
+            tables = components.get("tables", [])
+            forms = components.get("forms", [])
+            checkboxes = [f for f in forms if "checkbox" in f.get("field_type", "")]
+
+            component_context = f"""
+**Components Detected:**
+- Tables: {len(tables)}
+- Form Fields: {len(forms)}
+- Checkboxes: {len(checkboxes)}
+- Key-Value Pairs: {len(components.get('key_value_pairs', []))}
+
+**Extraction Strategy:** {components.get('suggested_extraction_strategies', {})}
+"""
+
+        # Build field instructions (field_defs already chunked by caller)
+        field_instructions = ""
+        for field in field_defs:
+            name = field.get("field_name", "unknown")
+            display = field.get("display_name", name)
+            ftype = field.get("field_type", "text")
+            desc = field.get("description", "")
+            required = field.get("required", False)
+            location_hint = field.get("location_hint", "")
+
+            req_marker = "**REQUIRED**" if required else "optional"
+
+            field_instructions += f"""
+### {display} (`{name}`) - {req_marker}
+- Type: {ftype}
+- Description: {desc}
+- Location Hint: {location_hint}
+- Component: {field.get('source_component_id', 'unknown')}
+"""
+
+        pass_instruction = "PASS 1: Extract all visible values. Focus on completeness." if is_first_pass else "PASS 2: Verify each value independently. Focus on accuracy. Be skeptical."
+
+        return f"""# ADAPTIVE EXTRACTION - Page {page_number}/{total_pages}
+
+{pass_instruction}
+
+## Document Context
+
+**Document Type:** {document_desc}
+
+{layout_context}
+
+{component_context}
+
+## Fields to Extract
+
+{field_instructions}
+
+## Extraction Instructions
+
+1. **Use Layout Context**: Pay attention to regions, reading order, and visual structure
+2. **Component-Specific Strategies**:
+   - Tables: Extract row-by-row, maintaining column structure
+   - Forms: Match field labels to values spatially
+   - Checkboxes: Detect visual marks (✓ ✗ ☑ ☐) to determine state
+   - Key-Value Pairs: Associate labels with values based on separators
+
+3. **Visual Mark Detection**:
+   - Look for checkmarks, ticks, crosses in checkbox areas
+   - Note stamps, signatures, handwritten annotations
+   - Identify redactions or obscured content
+
+4. **Confidence Scoring** (0.0-1.0):
+   - 0.95+: Crystal clear, no doubt
+   - 0.85-0.94: Clear but minor uncertainty
+   - 0.70-0.84: Readable but needs verification
+   - <0.70: Too uncertain → return null
+
+5. **Spatial Validation**:
+   - Values should be in expected regions
+   - Check if location matches component bounding boxes
+   - Verify reading order makes sense
+
+## Required Output Format
+
+```json
+{{
+  "page_number": {page_number},
+  "extraction_pass": {1 if is_first_pass else 2},
+  "fields": {{
+    "field_name": {{
+      "value": "extracted value or null",
+      "confidence": 0.92,
+      "location": "description of where found",
+      "bbox": {{"x": 0.12, "y": 0.05, "w": 0.25, "h": 0.03}},
+      "component_type": "table|form|checkbox|key_value",
+      "visual_marks": ["any marks associated with this field"]
+    }}
+  }},
+  "extraction_notes": "Observations about extraction quality",
+  "uncertain_fields": ["list of fields with low confidence"],
+  "component_extractions": {{
+    "table_1": [/* extracted table rows */],
+    "checkboxes": {{"checkbox_id": "checked|unchecked"}}
+  }}
+}}
+```
+
+**Bounding Box (bbox)**: For each field, provide normalized coordinates (0.0-1.0):
+- x = left edge, y = top edge, w = width, h = height
+- (0,0) is top-left, (1,1) is bottom-right of the page
+- Omit bbox if value is null or location cannot be determined
+
+## Critical Reminders
+
+- **Return null for uncertain values** - Do NOT guess
+- **Use component context** - Extract appropriately for each component type
+- **Detect visual marks** - Checkboxes, stamps, signatures, ticks, crosses
+- **Spatial awareness** - Values should match expected locations
+- **Confidence honesty** - Be realistic about uncertainty
+
+Begin adaptive extraction now."""
+
+    def _merge_page_extractions_adaptive(
+        self,
+        page_extractions: list[dict[str, Any]],
+        adaptive_schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Merge extractions from multiple pages for adaptive schema.
+
+        Two-phase merge:
+        1. Match extracted fields against schema-defined field names.
+        2. Pass through ALL remaining extracted fields not in the schema
+           (the VLM often returns fields the schema generator didn't predict).
+
+        Args:
+            page_extractions: List of per-page extraction results.
+            adaptive_schema: Adaptive schema definition.
+
+        Returns:
+            Merged extraction dictionary with all extracted data preserved.
+        """
+        merged: dict[str, Any] = {}
+        schema_fields = adaptive_schema.get("fields", [])
+        schema_field_names = {f.get("field_name") for f in schema_fields}
+        schema_field_types = {f.get("field_name"): f.get("field_type", "text") for f in schema_fields}
+
+        # Track which extracted fields were consumed by schema matching
+        consumed_fields: set[str] = set()
+
+        # --- Phase 1: Schema-matched fields ---
+        for field in schema_fields:
+            field_name = field.get("field_name")
+            values = []
+
+            for page_ext in page_extractions:
+                merged_fields = page_ext.get("merged_fields", {})
+                if field_name in merged_fields:
+                    field_data = merged_fields[field_name]
+                    value = field_data.get("value")
+                    if value is not None:
+                        values.append({
+                            "value": value,
+                            "confidence": field_data.get("confidence", 0.5),
+                            "page": page_ext.get("page_number", 0),
+                        })
+                        consumed_fields.add(field_name)
+
+            if values:
+                if field.get("field_type") in ["list", "table"]:
+                    all_confidences = [v["confidence"] for v in values]
+                    avg_conf = sum(all_confidences) / len(all_confidences) if all_confidences else 0.5
+                    source_pages = sorted({v["page"] for v in values})
+                    merged[field_name] = {
+                        "value": [v["value"] for v in values],
+                        "confidence": avg_conf,
+                        "source_pages": source_pages,
+                    }
+                else:
+                    best = max(values, key=lambda v: v["confidence"])
+                    merged[field_name] = {
+                        "value": best["value"],
+                        "confidence": best["confidence"],
+                        "source_page": best["page"],
+                    }
+
+        # --- Phase 2: Pass-through for all remaining extracted fields ---
+        # The VLM often extracts fields not predicted by the schema generator
+        # (e.g. individual patient rows, table data, extra metadata).
+        # We preserve ALL extracted data so nothing is silently dropped.
+        for page_ext in page_extractions:
+            page_num = page_ext.get("page_number", 0)
+            merged_fields = page_ext.get("merged_fields", {})
+
+            for field_name, field_data in merged_fields.items():
+                if field_name in consumed_fields:
+                    continue  # Already handled by schema match
+
+                value = field_data.get("value") if isinstance(field_data, dict) else field_data
+                confidence = field_data.get("confidence", 0.5) if isinstance(field_data, dict) else 0.5
+
+                if value is None:
+                    continue
+
+                if field_name in merged:
+                    # Multi-page: aggregate as list
+                    existing = merged[field_name]
+                    if isinstance(existing.get("value"), list):
+                        existing["value"].append(value)
+                        existing.setdefault("source_pages", []).append(page_num)
+                    else:
+                        merged[field_name] = {
+                            "value": [existing.get("value"), value],
+                            "confidence": (existing.get("confidence", 0.5) + confidence) / 2,
+                            "source_pages": [existing.get("source_page", 0), page_num],
+                        }
+                else:
+                    merged[field_name] = {
+                        "value": value,
+                        "confidence": confidence,
+                        "source_page": page_num,
+                    }
+                consumed_fields.add(field_name)
+
+        self._logger.info(
+            "adaptive_merge_complete",
+            schema_fields=len(schema_field_names),
+            total_merged=len(merged),
+            pass_through_fields=len(merged) - len([f for f in merged if f in schema_field_names]),
+        )
+
+        return merged
+
+    def _get_schema(self, state: ExtractionState) -> DocumentSchema | None:
+        """
+        Get the schema for extraction.
+
+        Args:
+            state: Current extraction state.
+
+        Returns:
+            DocumentSchema or None if not found.
+        """
+        # Check for custom schema
+        custom_schema = state.get("custom_schema")
+        if custom_schema:
+            # Build schema from custom definition
+            return self._build_custom_schema(custom_schema)
+
+        # Get schema by name
+        schema_name = state.get("selected_schema_name", "")
+        if schema_name:
+            try:
+                return self._schema_registry.get(schema_name)
+            except ValueError:
+                self._logger.warning("schema_not_found", schema_name=schema_name)
+
+        # Return a generic fallback schema for unknown/other documents
+        self._logger.info("using_generic_schema", reason="No specific schema found")
+        return self._create_generic_schema()
+
+    def _create_generic_schema(self) -> DocumentSchema:
+        """
+        Create a generic schema for documents without a specific schema.
+
+        Returns:
+            A generic DocumentSchema that extracts common document fields.
+        """
+        from src.schemas import DocumentType, FieldType
+        from src.schemas.schema_builder import FieldBuilder, SchemaBuilder
+
+        builder = SchemaBuilder(
+            name="generic_document",
+            document_type=DocumentType.CUSTOM,
+        )
+
+        builder.display_name("Generic Document")
+        builder.description("Generic schema for extracting common document information")
+
+        # Add common fields using fluent API
+        schema = (
+            builder.field(
+                FieldBuilder("title")
+                .display_name("Document Title")
+                .type(FieldType.STRING)
+                .description("Main title or heading of the document")
+                .location_hint("top of page, header area")
+            )
+            .field(
+                FieldBuilder("date")
+                .display_name("Date")
+                .type(FieldType.DATE)
+                .description("Primary date on the document")
+                .location_hint("header, top right, or near title")
+            )
+            .field(
+                FieldBuilder("document_type")
+                .display_name("Document Type")
+                .type(FieldType.STRING)
+                .description("Type or category of the document")
+            )
+            .field(
+                FieldBuilder("summary")
+                .display_name("Summary")
+                .type(FieldType.STRING)
+                .description("Brief summary of the document content")
+            )
+            .field(
+                FieldBuilder("key_information")
+                .display_name("Key Information")
+                .type(FieldType.STRING)
+                .description("Important facts, figures, or data from the document")
+            )
+            .build()
+        )
+
+        return schema
+
+    def _build_custom_schema(self, schema_def: dict[str, Any]) -> DocumentSchema:
+        """
+        Build a DocumentSchema from a custom schema definition.
+
+        Uses shared utility to eliminate code duplication.
+
+        Args:
+            schema_def: Custom schema definition dictionary.
+
+        Returns:
+            Constructed DocumentSchema.
+        """
+        return build_custom_schema(schema_def)
+
+    def _extract_page(
+        self,
+        page_data: dict[str, Any],
+        schema: DocumentSchema,
+        document_type: str,
+        total_pages: int,
+        structure_context: dict[str, Any] | None = None,
+        *,
+        profile: str | None = None,
+    ) -> PageExtraction:
+        """
+        Extract data from a single page using dual-pass strategy.
+
+        Args:
+            page_data: Page image data.
+            schema: Extraction schema.
+            document_type: Type of document.
+            total_pages: Total number of pages.
+            structure_context: Optional structure analysis from analyzer.
+
+        Returns:
+            PageExtraction with merged results.
+        """
+        page_number = page_data.get("page_number", 1)
+        image_data = page_data.get("data_uri") or page_data.get("base64_encoded", "")
+
+        if not image_data:
+            return PageExtraction(
+                page_number=page_number,
+                errors=["No image data available for page"],
+            )
+
+        # Extract OCR text layer for hybrid vision+text approach
+        ocr_text = page_data.get("text_content", "")
+
+        start_time = time.perf_counter()
+        vlm_calls = 0
+
+        try:
+            # Convert schema fields to list of dicts for prompt
+            field_defs = [f.to_dict() for f in schema.fields]
+
+            # === PASS 1: Standard Extraction ===
+            pass1_result = self._perform_extraction_pass(
+                image_data=image_data,
+                field_defs=field_defs,
+                document_type=document_type,
+                page_number=page_number,
+                total_pages=total_pages,
+                is_first_pass=True,
+                structure_context=structure_context,
+                ocr_text=ocr_text,
+                profile=profile,
+            )
+            vlm_calls += 1
+
+            # === PASS 2: Verification Extraction ===
+            pass2_result = self._perform_extraction_pass(
+                image_data=image_data,
+                field_defs=field_defs,
+                document_type=document_type,
+                page_number=page_number,
+                total_pages=total_pages,
+                is_first_pass=False,
+                structure_context=structure_context,
+                ocr_text=ocr_text,
+                profile=profile,
+            )
+            vlm_calls += 1
+
+            # === MERGE RESULTS ===
+            merged_fields = self._merge_pass_results(
+                pass1_result.get("fields", {}),
+                pass2_result.get("fields", {}),
+                page_number,
+            )
+
+            extraction_time_ms = int((time.perf_counter() - start_time) * 1000)
+
+            return PageExtraction(
+                page_number=page_number,
+                pass1_raw=pass1_result,
+                pass2_raw=pass2_result,
+                merged_fields=merged_fields,
+                extraction_time_ms=extraction_time_ms,
+                vlm_calls=vlm_calls,
+                errors=[],
+            )
+
+        except Exception as e:
+            self._logger.error(
+                "page_extraction_failed",
+                page_number=page_number,
+                error=str(e),
+            )
+            return PageExtraction(
+                page_number=page_number,
+                errors=[f"Extraction failed: {e}"],
+                vlm_calls=vlm_calls,
+            )
+
+    def _perform_extraction_pass(
+        self,
+        image_data: str,
+        field_defs: list[dict[str, Any]],
+        document_type: str,
+        page_number: int,
+        total_pages: int,
+        is_first_pass: bool,
+        structure_context: dict[str, Any] | None = None,
+        ocr_text: str = "",
+        *,
+        profile: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Perform a single extraction pass with enhanced prompts and retry logic.
+
+        Args:
+            image_data: Base64-encoded image.
+            field_defs: List of field definitions.
+            document_type: Type of document.
+            page_number: Current page number.
+            total_pages: Total pages.
+            is_first_pass: Whether this is pass 1 or 2.
+            structure_context: Optional structure analysis from analyzer (tables,
+                handwriting, layout info) to enhance prompt accuracy.
+            ocr_text: Optional OCR text layer from the PDF for hybrid extraction.
+
+        Returns:
+            Extraction result dictionary.
+        """
+        # Build enhanced system prompt with chain-of-thought and anti-hallucination
+        system_prompt = build_enhanced_system_prompt(
+            document_type=document_type,
+            is_verification_pass=not is_first_pass,
+            structure_context=structure_context,
+        )
+
+        # Build extraction prompt with enhanced features
+        if is_first_pass:
+            prompt = build_extraction_prompt(
+                schema_fields=field_defs,
+                document_type=document_type,
+                page_number=page_number,
+                total_pages=total_pages,
+                is_first_pass=True,
+                include_reasoning=True,
+                include_anti_patterns=True,
+                profile=profile,
+            )
+        else:
+            prompt = build_verification_prompt(
+                schema_fields=field_defs,
+                document_type=document_type,
+                page_number=page_number,
+                first_pass_results={},  # Don't show first pass to ensure independence
+            )
+
+        # Inject OCR text layer as supplementary context for hybrid extraction
+        # This helps the VLM cross-validate its visual reading against embedded text
+        if ocr_text:
+            # Smart truncation: keep header/body AND footer (totals, signatures)
+            if len(ocr_text) > 2000:
+                ocr_snippet = ocr_text[:1200] + "\n...[truncated middle]...\n" + ocr_text[-800:]
+            else:
+                ocr_snippet = ocr_text
+            prompt += (
+                "\n\n--- OCR TEXT LAYER (for cross-reference only) ---\n"
+                "The following text was extracted from the PDF's embedded text layer. "
+                "Use it to cross-check your visual reading. If the image and text "
+                "disagree, prefer what you see in the image but lower your confidence.\n\n"
+                f"{ocr_snippet}\n"
+                "--- END OCR TEXT ---"
+            )
+
+        # Phase 3B: Enhance prompt with correction history warnings
+        if self._prompt_enhancer is not None:
+            field_names = [f.get("field_name") or f.get("name", "") for f in field_defs if f.get("field_name") or f.get("name")]
+            try:
+                enhancement = self._prompt_enhancer.enhance_prompt(
+                    base_prompt=prompt,
+                    field_names=field_names,
+                    document_type=document_type,
+                )
+                prompt = enhancement.enhanced_prompt
+            except Exception as enh_err:
+                self._logger.warning(
+                    "prompt_enhancement_failed",
+                    error=str(enh_err),
+                )
+
+        # Use retry with exponential backoff for VLM calls
+        settings = get_settings()
+        retry_config = RetryConfig(
+            max_retries=settings.extraction.max_retries,
+            base_delay_ms=500,
+            max_delay_ms=settings.agent.max_retry_delay_ms,
+        )
+
+        # Differentiate temperature between passes for independent verification.
+        # Same temperature produces correlated errors, inflating agreement scores.
+        temperature = 0.1 if is_first_pass else 0.3
+
+        def make_vlm_call() -> dict[str, Any]:
+            # V3 Phase 1: schema-bound call (permissive envelope).
+            payload, _trace = self.send_vision_request_with_schema(
+                image_data=image_data,
+                prompt=prompt,
+                schema=_ExtractionEnvelope,
+                system_prompt=system_prompt,
+                temperature=temperature,
+            )
+            return payload
+
+        try:
+            return retry_with_backoff(
+                func=make_vlm_call,
+                config=retry_config,
+                on_retry=lambda attempt, e: self._logger.warning(
+                    "extraction_pass_retry",
+                    pass_number=1 if is_first_pass else 2,
+                    attempt=attempt + 1,
+                    error=str(e),
+                ),
+            )
+        except Exception as e:
+            self._logger.warning(
+                "extraction_pass_failed",
+                pass_number=1 if is_first_pass else 2,
+                error=str(e),
+            )
+            return {"fields": {}, "error": str(e)}
+
+    def _merge_pass_results(
+        self,
+        pass1_fields: dict[str, Any],
+        pass2_fields: dict[str, Any],
+        page_number: int,
+    ) -> dict[str, FieldMetadata]:
+        """
+        Merge results from both extraction passes using DualPassComparator.
+
+        Uses sophisticated comparison algorithm from validation module for:
+        - Fuzzy matching with similarity scoring
+        - Confidence-weighted value selection
+        - Agreement rate calculation
+
+        Args:
+            pass1_fields: Fields from pass 1.
+            pass2_fields: Fields from pass 2.
+            page_number: Current page number.
+
+        Returns:
+            Dictionary of merged FieldMetadata.
+        """
+        # Extract values and confidences from pass data
+        pass1_values: dict[str, Any] = {}
+        pass2_values: dict[str, Any] = {}
+        pass1_conf: dict[str, float] = {}
+        pass2_conf: dict[str, float] = {}
+        locations: dict[str, str] = {}
+        bboxes: dict[str, BoundingBoxCoords | None] = {}
+
+        all_fields = set(pass1_fields.keys()) | set(pass2_fields.keys())
+
+        for field_name in all_fields:
+            p1 = pass1_fields.get(field_name, {})
+            p2 = pass2_fields.get(field_name, {})
+
+            # Extract values
+            pass1_values[field_name] = p1.get("value") if isinstance(p1, dict) else p1
+            pass2_values[field_name] = p2.get("value") if isinstance(p2, dict) else p2
+
+            # Extract confidences
+            p1_conf = p1.get("confidence", 0.5) if isinstance(p1, dict) else 0.5
+            p2_conf = p2.get("confidence", 0.5) if isinstance(p2, dict) else 0.5
+            pass1_conf[field_name] = p1_conf
+            pass2_conf[field_name] = p2_conf
+
+            # Extract locations
+            loc1 = p1.get("location", "") if isinstance(p1, dict) else ""
+            loc2 = p2.get("location", "") if isinstance(p2, dict) else ""
+            locations[field_name] = loc1 or loc2
+
+            # Extract bounding boxes — prefer bbox from higher-confidence pass
+            bbox1_raw = p1.get("bbox") if isinstance(p1, dict) else None
+            bbox2_raw = p2.get("bbox") if isinstance(p2, dict) else None
+            bbox = None
+            if bbox1_raw and bbox2_raw:
+                # Both passes have bbox — use the one from higher-confidence pass
+                bbox_raw = bbox1_raw if p1_conf >= p2_conf else bbox2_raw
+                bbox = self._parse_bbox(bbox_raw, page_number)
+            elif bbox1_raw:
+                bbox = self._parse_bbox(bbox1_raw, page_number)
+            elif bbox2_raw:
+                bbox = self._parse_bbox(bbox2_raw, page_number)
+            bboxes[field_name] = bbox
+
+        # Use DualPassComparator for sophisticated merging
+        comparison_result = self._dual_pass_comparator.compare(
+            pass1_data=pass1_values,
+            pass2_data=pass2_values,
+            pass1_confidence=pass1_conf,
+            pass2_confidence=pass2_conf,
+        )
+
+        # Convert comparison results to FieldMetadata
+        merged: dict[str, FieldMetadata] = {}
+        for field_name, field_comparison in comparison_result.field_comparisons.items():
+            passes_agree = field_comparison.result in (
+                ComparisonResult.EXACT_MATCH,
+                ComparisonResult.FUZZY_MATCH,
+            )
+
+            merged[field_name] = FieldMetadata(
+                field_name=field_name,
+                value=field_comparison.merged_value,
+                confidence=field_comparison.merge_confidence,
+                pass1_value=field_comparison.pass1_value,
+                pass2_value=field_comparison.pass2_value,
+                passes_agree=passes_agree,
+                location_hint=locations.get(field_name, ""),
+                source_page=page_number,
+                bbox=bboxes.get(field_name),
+            )
+
+        return merged
+
+    @staticmethod
+    def _parse_bbox(
+        bbox_raw: Any,
+        page_number: int,
+    ) -> BoundingBoxCoords | None:
+        """
+        Parse a bounding box from VLM response into BoundingBoxCoords.
+
+        Handles multiple VLM response formats:
+        - {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.04}
+        - {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.04}
+        - [x, y, w, h] array format
+
+        Args:
+            bbox_raw: Raw bbox data from VLM response.
+            page_number: Page number for the bbox.
+
+        Returns:
+            BoundingBoxCoords or None if parsing fails.
+        """
+        try:
+            if isinstance(bbox_raw, dict):
+                x = float(bbox_raw.get("x", 0))
+                y = float(bbox_raw.get("y", 0))
+                w = float(bbox_raw.get("w", bbox_raw.get("width", 0)))
+                h = float(bbox_raw.get("h", bbox_raw.get("height", 0)))
+            elif isinstance(bbox_raw, (list, tuple)) and len(bbox_raw) >= 4:
+                x, y, w, h = (float(v) for v in bbox_raw[:4])
+            else:
+                return None
+
+            # Validate ranges
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                return None
+            if w <= 0.0 or h <= 0.0:
+                return None
+
+            return BoundingBoxCoords.from_normalized(
+                x=x, y=y, w=w, h=h, page=page_number,
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _merge_page_extractions(
+        self,
+        page_extractions: list[dict[str, Any]],
+        schema: DocumentSchema,
+    ) -> dict[str, Any]:
+        """
+        Merge extractions from multiple pages into final result.
+
+        For LIST/TABLE fields: Merges values across pages into arrays.
+        For scalar fields: Keeps value with highest confidence.
+
+        Args:
+            page_extractions: List of serialized PageExtraction dicts.
+            schema: Document schema.
+
+        Returns:
+            Merged extraction dictionary.
+        """
+        from src.schemas.field_types import FieldType
+
+        merged: dict[str, Any] = {}
+
+        # Build field type lookup from schema
+        field_types: dict[str, FieldType] = {}
+        if schema and hasattr(schema, "fields"):
+            for field_def in schema.fields:
+                field_types[field_def.name] = field_def.field_type
+
+        def is_mergeable_type(field_name: str) -> bool:
+            """Check if field should merge values instead of overwrite."""
+            field_type = field_types.get(field_name)
+            return field_type in (FieldType.LIST, FieldType.TABLE)
+
+        # For single-page documents, use page 1 directly
+        if len(page_extractions) == 1:
+            page = page_extractions[0]
+            for field_name, field_data in page.get("merged_fields", {}).items():
+                merged[field_name] = {
+                    "value": field_data.get("value"),
+                    "confidence": field_data.get("confidence", 0.0),
+                    "source_page": field_data.get("source_page", 1),
+                }
+            return merged
+
+        # For multi-page documents, apply intelligent merging
+        for page in page_extractions:
+            page_number = page.get("page_number", 1)
+            for field_name, field_data in page.get("merged_fields", {}).items():
+                current_value = field_data.get("value")
+                current_confidence = field_data.get("confidence", 0.0)
+
+                if field_name not in merged:
+                    # First occurrence - initialize
+                    if is_mergeable_type(field_name):
+                        # For list/table types, wrap in list if not already
+                        value_list = (
+                            current_value if isinstance(current_value, list) else [current_value]
+                        )
+                        merged[field_name] = {
+                            "value": value_list,
+                            "confidence": current_confidence,
+                            "source_pages": [page_number],
+                        }
+                    else:
+                        merged[field_name] = {
+                            "value": current_value,
+                            "confidence": current_confidence,
+                            "source_page": page_number,
+                        }
+                # Field exists - merge or overwrite based on type
+                elif is_mergeable_type(field_name):
+                    # Merge list/table values
+                    existing_value = merged[field_name].get("value", [])
+                    if not isinstance(existing_value, list):
+                        existing_value = [existing_value]
+
+                    if current_value is not None:
+                        if isinstance(current_value, list):
+                            existing_value.extend(current_value)
+                        else:
+                            existing_value.append(current_value)
+
+                    # True average confidence across all contributing pages
+                    confidence_sum = merged[field_name].get("_confidence_sum", merged[field_name].get("confidence", 0.0))
+                    confidence_count = merged[field_name].get("_confidence_count", 1)
+                    confidence_sum += current_confidence
+                    confidence_count += 1
+
+                    source_pages = merged[field_name].get("source_pages", [])
+                    if page_number not in source_pages:
+                        source_pages.append(page_number)
+
+                    merged[field_name] = {
+                        "value": existing_value,
+                        "confidence": confidence_sum / confidence_count,
+                        "source_pages": source_pages,
+                        "_confidence_sum": confidence_sum,
+                        "_confidence_count": confidence_count,
+                    }
+                else:
+                    # For scalar types, keep value with higher confidence
+                    existing_confidence = merged[field_name].get("confidence", 0.0)
+                    if current_confidence > existing_confidence and current_value is not None:
+                        merged[field_name] = {
+                            "value": current_value,
+                            "confidence": current_confidence,
+                            "source_page": page_number,
+                        }
+
+        # Strip internal tracking keys before returning
+        for field_name, field_data in merged.items():
+            if isinstance(field_data, dict):
+                field_data.pop("_confidence_sum", None)
+                field_data.pop("_confidence_count", None)
+
+        return merged
+
+    def _build_field_metadata(
+        self,
+        merged_extraction: dict[str, Any],
+    ) -> dict[str, FieldMetadata]:
+        """
+        Build FieldMetadata objects from merged extraction.
+
+        Args:
+            merged_extraction: Merged extraction dictionary.
+
+        Returns:
+            Dictionary of FieldMetadata objects.
+        """
+        metadata: dict[str, FieldMetadata] = {}
+
+        for field_name, field_data in merged_extraction.items():
+            # Handle both old format (dict with value/confidence) and new format (direct values)
+            if isinstance(field_data, dict) and "value" in field_data:
+                # Parse bbox if present in the merged data
+                bbox = None
+                bbox_data = field_data.get("bbox")
+                if isinstance(bbox_data, dict):
+                    bbox = self._parse_bbox(
+                        bbox_data,
+                        field_data.get("source_page", 1),
+                    )
+
+                metadata[field_name] = FieldMetadata(
+                    field_name=field_name,
+                    value=field_data.get("value"),
+                    confidence=field_data.get("confidence", 0.0),
+                    source_page=field_data.get("source_page", 1),
+                    bbox=bbox,
+                )
+            else:
+                # Direct value without structured metadata — flag with low default
+                # confidence to ensure the validator treats it cautiously
+                metadata[field_name] = FieldMetadata(
+                    field_name=field_name,
+                    value=field_data,
+                    confidence=0.5,  # Conservative default for unstructured data
+                    source_page=1,
+                )
+
+        return metadata
+
+    def extract_single_field(
+        self,
+        image_data: str,
+        field_definition: FieldDefinition,
+        document_type: str = "OTHER",
+    ) -> AgentResult[FieldMetadata]:
+        """
+        Extract a single field from an image.
+
+        Useful for targeted re-extraction of specific fields.
+
+        Args:
+            image_data: Base64-encoded image.
+            field_definition: Definition of field to extract.
+            document_type: Type of document.
+
+        Returns:
+            AgentResult with FieldMetadata.
+        """
+        from src.prompts.extraction import build_field_prompt
+
+        start_time = self.log_operation_start(
+            "single_field_extraction",
+            field_name=field_definition.name,
+        )
+
+        try:
+            system_prompt = build_grounded_system_prompt(
+                include_confidence_scale=True,
+            )
+
+            prompt = build_field_prompt(
+                field_definition=field_definition.to_dict(),
+                document_type=document_type,
+            )
+
+            # V3 Phase 1: schema-bound single-field call (permissive envelope).
+            result, _trace = self.send_vision_request_with_schema(
+                image_data=image_data,
+                prompt=prompt,
+                schema=_ExtractionEnvelope,
+                system_prompt=system_prompt,
+            )
+
+            metadata = FieldMetadata(
+                field_name=field_definition.name,
+                value=result.get("value"),
+                confidence=result.get("confidence", 0.0),
+                location_hint=result.get("location", ""),
+            )
+
+            duration_ms = self.log_operation_complete(
+                "single_field_extraction",
+                start_time,
+                success=True,
+            )
+
+            return AgentResult.ok(
+                data=metadata,
+                agent_name=self.name,
+                operation="extract_field",
+                vlm_calls=1,
+                processing_time_ms=duration_ms,
+            )
+
+        except Exception as e:
+            self.log_operation_complete(
+                "single_field_extraction",
+                start_time,
+                success=False,
+            )
+            return AgentResult.fail(
+                error=str(e),
+                agent_name=self.name,
+                operation="extract_field",
+            )

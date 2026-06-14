@@ -1,0 +1,947 @@
+"""
+Extraction state definitions for LangGraph workflow.
+
+Defines the TypedDict state that flows through the extraction pipeline,
+tracking all extraction data, validation results, and control flow.
+"""
+
+import copy
+import secrets
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, TypedDict
+
+
+class ExtractionStatus(str, Enum):
+    """Status of the extraction pipeline."""
+
+    PENDING = "pending"
+    PREPROCESSING = "preprocessing"
+    ANALYZING = "analyzing"
+    EXTRACTING = "extracting"
+    VALIDATING = "validating"
+    RETRYING = "retrying"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    HUMAN_REVIEW = "human_review"
+
+
+class ConfidenceLevel(str, Enum):
+    """Confidence level classification."""
+
+    HIGH = "high"  # >= 0.85
+    MEDIUM = "medium"  # 0.50 - 0.84
+    LOW = "low"  # < 0.50
+
+
+@dataclass(frozen=True, slots=True)
+class BoundingBoxCoords:
+    """
+    Bounding box coordinates for visual grounding of extracted fields.
+
+    Links every extracted value to its pixel-level location in the source
+    document, enabling visual verification and spatial validation.
+
+    Coordinates are stored in two formats:
+    - Normalized (0.0-1.0): Resolution-independent, used in VLM prompts
+    - Absolute pixel: Computed from page dimensions, used for rendering
+
+    Attributes:
+        x: Normalized left edge (0.0 = left, 1.0 = right).
+        y: Normalized top edge (0.0 = top, 1.0 = bottom).
+        width: Normalized width.
+        height: Normalized height.
+        page: 1-indexed page number.
+        pixel_x: Absolute left edge in pixels.
+        pixel_y: Absolute top edge in pixels.
+        pixel_width: Absolute width in pixels.
+        pixel_height: Absolute height in pixels.
+    """
+
+    x: float
+    y: float
+    width: float
+    height: float
+    page: int = 1
+    pixel_x: int = 0
+    pixel_y: int = 0
+    pixel_width: int = 0
+    pixel_height: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "page": self.page,
+            "pixel_x": self.pixel_x,
+            "pixel_y": self.pixel_y,
+            "pixel_width": self.pixel_width,
+            "pixel_height": self.pixel_height,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BoundingBoxCoords":
+        """Create from dictionary (e.g., deserialized JSON)."""
+        return cls(
+            x=float(data.get("x", 0.0)),
+            y=float(data.get("y", 0.0)),
+            width=float(data.get("width", data.get("w", 0.0))),
+            height=float(data.get("height", data.get("h", 0.0))),
+            page=int(data.get("page", 1)),
+            pixel_x=int(data.get("pixel_x", 0)),
+            pixel_y=int(data.get("pixel_y", 0)),
+            pixel_width=int(data.get("pixel_width", 0)),
+            pixel_height=int(data.get("pixel_height", 0)),
+        )
+
+    @classmethod
+    def from_normalized(
+        cls,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        page: int = 1,
+        page_width_px: int = 0,
+        page_height_px: int = 0,
+    ) -> "BoundingBoxCoords":
+        """
+        Create from normalized VLM coordinates with optional pixel conversion.
+
+        Args:
+            x: Normalized left edge (0.0-1.0).
+            y: Normalized top edge (0.0-1.0).
+            w: Normalized width (0.0-1.0).
+            h: Normalized height (0.0-1.0).
+            page: 1-indexed page number.
+            page_width_px: Page width in pixels (0 = skip pixel computation).
+            page_height_px: Page height in pixels (0 = skip pixel computation).
+
+        Returns:
+            BoundingBoxCoords with both normalized and pixel coordinates.
+        """
+        # Clamp to valid range
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
+        w = max(0.0, min(1.0 - x, w))
+        h = max(0.0, min(1.0 - y, h))
+
+        pixel_x = int(x * page_width_px) if page_width_px else 0
+        pixel_y = int(y * page_height_px) if page_height_px else 0
+        pixel_width = int(w * page_width_px) if page_width_px else 0
+        pixel_height = int(h * page_height_px) if page_height_px else 0
+
+        return cls(
+            x=x,
+            y=y,
+            width=w,
+            height=h,
+            page=page,
+            pixel_x=pixel_x,
+            pixel_y=pixel_y,
+            pixel_width=pixel_width,
+            pixel_height=pixel_height,
+        )
+
+    def is_valid(self) -> bool:
+        """Check if bounding box has valid non-zero dimensions."""
+        return self.width > 0.0 and self.height > 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class FieldMetadata:
+    """
+    Metadata for an extracted field.
+
+    Tracks extraction source, confidence, and validation status.
+
+    Attributes:
+        field_name: Name of the extracted field.
+        value: Extracted value.
+        confidence: Confidence score 0.0-1.0.
+        pass1_value: Value from first extraction pass.
+        pass2_value: Value from second extraction pass.
+        passes_agree: Whether both passes agree.
+        location_hint: Description of where value was found.
+        validation_passed: Whether field passed validation.
+        validation_errors: List of validation error messages.
+        source_page: Page number where value was found.
+        is_hallucination_flag: Whether flagged as potential hallucination.
+    """
+
+    field_name: str
+    value: Any
+    confidence: float
+    pass1_value: Any = None
+    pass2_value: Any = None
+    passes_agree: bool = True
+    location_hint: str = ""
+    validation_passed: bool = True
+    validation_errors: tuple[str, ...] = ()
+    source_page: int = 1
+    is_hallucination_flag: bool = False
+    bbox: BoundingBoxCoords | None = None
+
+    @property
+    def confidence_level(self) -> ConfidenceLevel:
+        """Get confidence level classification."""
+        if self.confidence >= 0.85:
+            return ConfidenceLevel.HIGH
+        if self.confidence >= 0.50:
+            return ConfidenceLevel.MEDIUM
+        return ConfidenceLevel.LOW
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary representation."""
+        result = {
+            "field_name": self.field_name,
+            "value": self.value,
+            "confidence": self.confidence,
+            "confidence_level": self.confidence_level.value,
+            "pass1_value": self.pass1_value,
+            "pass2_value": self.pass2_value,
+            "passes_agree": self.passes_agree,
+            "location_hint": self.location_hint,
+            "validation_passed": self.validation_passed,
+            "validation_errors": list(self.validation_errors),
+            "source_page": self.source_page,
+            "is_hallucination_flag": self.is_hallucination_flag,
+        }
+        if self.bbox is not None:
+            result["bbox"] = self.bbox.to_dict()
+        return result
+
+    def to_provenance(
+        self,
+        *,
+        extraction_path: list[str] | None = None,
+        agent_signatures: list[str] | None = None,
+        vlm_model_id: str = "",
+        mem0_match: str | None = None,
+    ) -> Any:  # returns Provenance — typed as Any to avoid an import cycle
+        """V3 Phase 4 — derive a ``Provenance`` from this metadata.
+
+        Bridges the legacy ``FieldMetadata`` shape to the V3
+        ``Provenance`` model so the dual-write reconciler can build a
+        ``FieldValue`` envelope without rewriting every extraction
+        node. Callers supply the fields the metadata didn't track:
+        ``extraction_path``, ``agent_signatures``, ``vlm_model_id``,
+        ``mem0_match``.
+
+        Lazy import of ``Provenance`` keeps ``state.py`` free of any
+        Pydantic v2 dep cycle (state.py is imported very early during
+        agent module loading).
+        """
+        from src.pipeline.provenance import Provenance
+
+        return Provenance(
+            page=self.source_page,
+            bbox=self.bbox,
+            source_block_id="",  # not tracked by FieldMetadata
+            extraction_path=list(extraction_path or []),
+            agent_signatures=list(agent_signatures or []),
+            confidence=self.confidence,
+            vlm_model_id=vlm_model_id,
+            mem0_match=mem0_match,
+        )
+
+
+@dataclass(slots=True)
+class PageExtraction:
+    """
+    Extraction results for a single page.
+
+    Attributes:
+        page_number: One-indexed page number.
+        pass1_raw: Raw JSON from first extraction pass.
+        pass2_raw: Raw JSON from second extraction pass.
+        merged_fields: Merged field values with metadata.
+        extraction_time_ms: Time taken for extraction.
+        vlm_calls: Number of VLM calls made.
+        errors: List of extraction errors.
+    """
+
+    page_number: int
+    pass1_raw: dict[str, Any] = field(default_factory=dict)
+    pass2_raw: dict[str, Any] = field(default_factory=dict)
+    merged_fields: dict[str, FieldMetadata] = field(default_factory=dict)
+    extraction_time_ms: int = 0
+    vlm_calls: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def overall_confidence(self) -> float:
+        """Calculate average confidence across all fields."""
+        if not self.merged_fields:
+            return 0.0
+        total = sum(f.confidence for f in self.merged_fields.values())
+        return total / len(self.merged_fields)
+
+    @property
+    def agreement_rate(self) -> float:
+        """Calculate rate of agreement between passes."""
+        if not self.merged_fields:
+            return 1.0
+        agreed = sum(1 for f in self.merged_fields.values() if f.passes_agree)
+        return agreed / len(self.merged_fields)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "page_number": self.page_number,
+            "pass1_raw": self.pass1_raw,
+            "pass2_raw": self.pass2_raw,
+            "merged_fields": {k: v.to_dict() for k, v in self.merged_fields.items()},
+            "extraction_time_ms": self.extraction_time_ms,
+            "vlm_calls": self.vlm_calls,
+            "errors": self.errors,
+            "overall_confidence": self.overall_confidence,
+            "agreement_rate": self.agreement_rate,
+        }
+
+
+@dataclass(slots=True)
+class ValidationResult:
+    """
+    Validation results from the Validator agent.
+
+    Attributes:
+        is_valid: Whether extraction passed validation.
+        overall_confidence: Overall extraction confidence.
+        confidence_level: Classification of confidence.
+        field_validations: Per-field validation results.
+        cross_field_validations: Cross-field rule validations.
+        hallucination_flags: Fields flagged as potential hallucinations.
+        warnings: Non-fatal validation warnings.
+        errors: Fatal validation errors.
+        requires_retry: Whether extraction should be retried.
+        requires_human_review: Whether human review is needed.
+        validation_time_ms: Time taken for validation.
+    """
+
+    is_valid: bool = True
+    overall_confidence: float = 0.0
+    raw_confidence: float | None = None
+    confidence_level: ConfidenceLevel = ConfidenceLevel.LOW
+    field_validations: dict[str, bool] = field(default_factory=dict)
+    cross_field_validations: list[dict[str, Any]] = field(default_factory=list)
+    hallucination_flags: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    requires_retry: bool = False
+    requires_human_review: bool = False
+    validation_time_ms: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "is_valid": self.is_valid,
+            "overall_confidence": self.overall_confidence,
+            "raw_confidence": self.raw_confidence,
+            "confidence_level": self.confidence_level.value,
+            "field_validations": self.field_validations,
+            "cross_field_validations": self.cross_field_validations,
+            "hallucination_flags": self.hallucination_flags,
+            "warnings": self.warnings,
+            "errors": self.errors,
+            "requires_retry": self.requires_retry,
+            "requires_human_review": self.requires_human_review,
+            "validation_time_ms": self.validation_time_ms,
+        }
+
+
+class DocumentAnalysis(TypedDict, total=False):
+    """Analysis results from Analyzer agent."""
+
+    document_type: str
+    document_type_confidence: float
+    schema_name: str
+    detected_structures: list[str]
+    has_tables: bool
+    has_handwriting: bool
+    has_signatures: bool
+    page_relationships: dict[int, str]
+    regions_of_interest: list[dict[str, Any]]
+    analysis_time_ms: int
+
+    # WS-3: specialized medical modes derived from the structure detections
+    # above plus per-page image-quality metrics. Multiple modes can apply
+    # simultaneously (e.g. a fax of a handwritten form). See
+    # ``src/agents/modality.py`` for the derivation rules.
+    modalities: list[str]
+    modalities_source: str  # "auto" | "user_override" | "auto_with_override"
+
+
+class ExtractionState(TypedDict, total=False):
+    """
+    Complete extraction state for LangGraph workflow.
+
+    This TypedDict defines all state that flows through the extraction
+    pipeline, tracking input, analysis, extraction, validation, and control.
+    """
+
+    # === Input Fields ===
+    pdf_path: str
+    pdf_hash: str
+    page_images: list[dict[str, Any]]  # Serialized PageImage data
+    custom_schema: dict[str, Any] | None
+    processing_id: str
+
+    # === VLM-First Analysis Fields (NEW) ===
+    layout_analyses: list[dict[str, Any]]  # Per-page LayoutAnalysis (layout_types.py)
+    component_maps: list[dict[str, Any]]  # Per-page ComponentMap (layout_types.py)
+    adaptive_schema: dict[str, Any] | None  # VLM-generated AdaptiveSchema (layout_types.py)
+    use_adaptive_extraction: bool  # Flag: use VLM-first or fallback to old schema
+
+    # === Legacy Analysis Fields (Kept for Compatibility) ===
+    analysis: DocumentAnalysis
+    selected_schema_name: str
+    document_type: str
+
+    # === Extraction Fields ===
+    page_extractions: list[dict[str, Any]]  # Serialized PageExtraction data
+    merged_extraction: dict[str, Any]  # Final merged extraction
+    field_metadata: dict[str, dict[str, Any]]  # Field name -> FieldMetadata dict
+
+    # === V3 Phase 2 — Heterogeneous dual-VLM extraction fields ===
+    # Populated only when ``settings.extraction.engine == "dual_vlm"``.
+    # Per-page raw outputs from each pass; the reconciler fuses them into
+    # ``merged_extraction``. Existing legacy callers continue to read
+    # ``merged_extraction`` and ``field_metadata`` unchanged.
+    pass1_result: dict[int, dict[str, Any]]  # page_index -> Qwen EXTRACTOR output
+    pass2_result: dict[int, dict[str, Any]]  # page_index -> Gemma AUDITOR output
+    pass1_model_id: str  # e.g. "qwen3.6-27b-vl@8001"
+    pass2_model_id: str  # e.g. "gemma-4-31b-vl@8002"
+    pass1_latency_ms: int  # cumulative across pages
+    pass2_latency_ms: int
+    reconciliation_metadata: dict[str, Any]  # agreement_rate, disagreements, tiebreakers_used
+    extraction_engine: str  # "legacy" | "dual_vlm" — what actually ran for this doc
+
+    # === V3 Phase 3 — Critic agent + confidence combiner ===
+    # Populated only when ``settings.extraction.critic_enabled`` is set.
+    # The Critic runs as an independent verifier after the validator;
+    # its output drives downstream routing via ``critic_recommendation``.
+    critic_report: dict[str, Any]  # serialised CriticReport: trust_score, concerns, recommendation
+    critic_recommendation: str  # "accept" | "verify_bbox" | "retry" | "human_review"
+    critic_model_id: str
+    critic_latency_ms: int
+    confidence_components: dict[str, float]  # {dual_pass, critic, modality_penalty, calibrated}
+
+    # === V3 Phase 5 — Document profile ===
+    # Populated by the analyzer's profile-detection step.
+    # ``profile`` is the selected profile name (default "generic-document").
+    # ``profile_confidence`` is the detection confidence in [0, 1].
+    # ``profile_signals_matched`` lists the matched detection signals
+    # for audit/UI consumption.
+    # ``profile_fallback_to_generic`` is True when no profile cleared
+    # its confidence floor and we defaulted to generic — distinct from
+    # "we positively detected generic".
+    # ``profile_override`` is the operator-supplied override (UI chip
+    # or API parameter); when set, detection scoring is skipped.
+    profile: str
+    profile_confidence: float
+    profile_signals_matched: list[str]
+    profile_fallback_to_generic: bool
+    profile_override: str | None
+
+    # === V3 Phase 4 — Provenance threading ===
+    # ``merged_extraction_v2`` is the FieldValue-shaped twin of
+    # ``merged_extraction``. The reconciler dual-writes both during
+    # the migration window so legacy exporters keep working while new
+    # exporters can opt into provenance-aware serialisation. When
+    # ``settings.provenance.enforce_field_value_wrapper`` flips to
+    # True, only this path is populated and downstream consumers
+    # MUST use ``unwrap_value()`` / ``unwrap_provenance()``.
+    #
+    # ``provenance_index`` is a flat ``{field_name: extraction_path[]}``
+    # map for cheap lookups by audit consumers that don't want to walk
+    # the full ``merged_extraction_v2`` tree.
+    merged_extraction_v2: dict[str, dict[str, Any]]
+    provenance_index: dict[str, list[str]]
+
+    # === Validation Fields ===
+    validation: dict[str, Any]  # Serialized ValidationResult
+    overall_confidence: float
+    confidence_level: str
+
+    # === Control Fields ===
+    status: str
+    current_step: str
+    retry_count: int
+    max_retries: int
+    errors: list[str]
+    warnings: list[str]
+
+    # === Timing Fields ===
+    start_time: str  # ISO format
+    end_time: str | None  # ISO format
+    total_vlm_calls: int
+    total_processing_time_ms: int
+
+    # === Output Fields ===
+    final_output: dict[str, Any] | None
+    requires_human_review: bool
+    human_review_reason: str | None
+
+    # === Document Splitting Fields (Phase 2A) ===
+    document_segments: list[dict[str, Any]]  # Detected sub-document boundaries
+    is_multi_document: bool  # Whether PDF contains multiple documents
+    active_segment_index: int  # Current segment being processed (0-indexed)
+
+    # === Table Detection Fields (Phase 2B) ===
+    detected_tables: list[dict[str, Any]]  # Per-page table detection results
+
+    # === Schema Proposal Fields (Phase 2C) ===
+    schema_proposal: dict[str, Any] | None  # Wizard-generated schema proposal
+
+    # === Dynamic Prompt Enhancement Fields (Phase 3B) ===
+    prompt_enhancement_applied: bool  # Whether correction-based enhancement was used
+
+    # === Memory Fields (Mem0 Integration) ===
+    session_id: str | None  # Session identifier for memory grouping
+    recovery_checkpoint: (
+        str | None
+    )  # Checkpoint identifier for recovery (renamed to avoid LangGraph reserved name)
+    memory_context: dict[str, Any] | None  # Retrieved context from memory
+    similar_docs: list[str]  # IDs of similar previously processed documents
+    provider_patterns: dict[str, Any] | None  # Provider-specific extraction patterns
+    correction_hints: dict[str, Any] | None  # Hints from past corrections
+
+    # === Human-in-the-Loop Fields (WS-5a) ===
+    # Reviewer corrections applied via Command(resume=...) at the
+    # human-review interrupt. Maps field_name -> corrected_value. The
+    # corrected values are also folded into ``merged_extraction`` with the
+    # ``{value, confidence: 1.0, human_corrected: True}`` envelope; this
+    # field is the audit trail of *what changed*.
+    human_corrections: dict[str, Any]
+
+    # === Specialized Modality Fields (WS-3) ===
+    # Derived modes (printed / handwritten / table / form / fax / visual)
+    # consumed by the image enhancer and prompt builder. Top-level mirror
+    # of ``analysis.modalities`` so downstream nodes can read it without
+    # walking into the analysis dict.
+    modalities: list[str]
+    # Optional caller-supplied override; when non-empty the analyzer
+    # respects the user's choice instead of (or alongside) auto-detection.
+    modality_override: list[str]
+    # Per-page image-quality metrics from ``ImageEnhancer.analyze_quality``;
+    # populated during preprocessing and consumed by ``derive_modalities``.
+    image_quality: list[dict[str, Any]]
+
+    # === PHI Mode Fields (WS-6) ===
+    # Per-request PHI redaction opt-in. When True, the validator routes
+    # every string field in ``merged_extraction`` through
+    # ``src.security.phi_redactor.PHIRedactor`` after validation. When
+    # absent / None, ``settings.phi.enabled`` controls. When False,
+    # explicitly disables PHI redaction even if the global setting is
+    # on (caller is asserting "this is non-sensitive synthetic data").
+    phi_mode: bool
+    # Audit trail of fields that were modified by PHI redaction. The
+    # original (un-redacted) values are NOT kept in state.
+    phi_redacted_fields: list[str]
+
+
+def create_initial_state(
+    pdf_path: str | Path,
+    pdf_hash: str | None = None,
+    page_images: list[dict[str, Any]] | None = None,
+    custom_schema: dict[str, Any] | None = None,
+    max_retries: int = 2,
+    processing_id: str | None = None,
+    *,
+    profile_override: str | None = None,
+    modality_override: list[str] | None = None,
+) -> ExtractionState:
+    """
+    Create initial extraction state for a new document.
+
+    Args:
+        pdf_path: Path to the PDF file.
+        pdf_hash: SHA-256 hash of the PDF (optional, can be set later).
+        page_images: List of serialized PageImage data (optional, can be set later).
+        custom_schema: Optional custom schema for zero-shot extraction.
+        max_retries: Maximum extraction retry attempts.
+        processing_id: Optional processing ID (auto-generated if not provided).
+        profile_override: Phase K — explicit profile id (e.g.
+            ``"medical-rcm"``, ``"generic-document"``). When set, the
+            analyzer skips auto-detection. ``None`` preserves the
+            previous behaviour.
+        modality_override: Phase 5 — explicit modality list (subset of
+            ``{printed, handwritten, table, form, fax, visual}``). When
+            non-empty, the analyzer respects this list verbatim.
+
+    Returns:
+        Initialized ExtractionState ready for pipeline.
+    """
+    if processing_id is None:
+        processing_id = secrets.token_hex(16)
+
+    return ExtractionState(
+        # Input
+        pdf_path=str(pdf_path),
+        pdf_hash=pdf_hash or "",
+        page_images=page_images or [],
+        custom_schema=custom_schema,
+        processing_id=processing_id,
+        # VLM-First Analysis (NEW)
+        layout_analyses=[],
+        component_maps=[],
+        adaptive_schema=None,
+        use_adaptive_extraction=True,  # Default to VLM-first approach
+        # Legacy Analysis (Compatibility)
+        analysis={},
+        selected_schema_name="",
+        document_type="",
+        # Extraction
+        page_extractions=[],
+        merged_extraction={},
+        field_metadata={},
+        # Validation
+        validation={},
+        overall_confidence=0.0,
+        confidence_level=ConfidenceLevel.LOW.value,
+        # Control
+        status=ExtractionStatus.PENDING.value,
+        current_step="initialized",
+        retry_count=0,
+        max_retries=max_retries,
+        errors=[],
+        warnings=[],
+        # Timing
+        start_time=datetime.now(UTC).isoformat(),
+        end_time=None,
+        total_vlm_calls=0,
+        total_processing_time_ms=0,
+        # Output
+        final_output=None,
+        requires_human_review=False,
+        human_review_reason=None,
+        # Document Splitting
+        document_segments=[],
+        is_multi_document=False,
+        active_segment_index=0,
+        # Table Detection
+        detected_tables=[],
+        # Schema Proposal
+        schema_proposal=None,
+        # Dynamic Prompt Enhancement
+        prompt_enhancement_applied=False,
+        # Memory
+        session_id=secrets.token_hex(8),
+        recovery_checkpoint=None,
+        memory_context=None,
+        similar_docs=[],
+        provider_patterns=None,
+        correction_hints=None,
+        # Phase K — operator / API supplied overrides. The analyzer
+        # reads ``profile_override`` to bypass auto-detection and
+        # ``modality_override`` to bypass modality detection.
+        profile_override=profile_override,
+        modality_override=list(modality_override) if modality_override else [],
+    )
+
+
+def update_state(
+    state: ExtractionState,
+    updates: dict[str, Any],
+) -> ExtractionState:
+    """
+    Create updated state with new values using selective copy.
+
+    This creates a new state dict with updates applied, ensuring
+    nested mutable structures (lists, dicts) are not shared between states.
+    Used for immutable state updates in LangGraph.
+
+    PERFORMANCE: page_images is treated as immutable (copied by reference) since
+    it contains large base64-encoded image data that is expensive to deep copy.
+    All other fields are deep copied for safety.
+
+    Args:
+        state: Current state.
+        updates: Dictionary of updates to apply.
+
+    Returns:
+        New ExtractionState with updates applied (selectively copied).
+    """
+    # Start with a shallow copy of the state dict
+    new_state: ExtractionState = {}  # type: ignore
+
+    # Selectively copy state fields
+    for key, value in dict(state).items():
+        if key == "page_images":
+            # page_images is large and treated as immutable - use reference copy
+            # This avoids expensive deep copy of base64 image data
+            new_state[key] = value  # type: ignore
+        else:
+            # Deep copy all other mutable fields for safety
+            new_state[key] = copy.deepcopy(value)  # type: ignore
+
+    # Apply updates - also selectively copy
+    for key, value in updates.items():
+        if key == "page_images":
+            # page_images updates are also copied by reference
+            new_state[key] = value  # type: ignore
+        else:
+            # Deep copy update values to prevent external mutation
+            new_state[key] = copy.deepcopy(value)  # type: ignore
+
+    return new_state
+
+
+def add_error(state: ExtractionState, error: str) -> ExtractionState:
+    """Add an error to the state."""
+    errors = list(state.get("errors", []))
+    errors.append(error)
+    return update_state(state, {"errors": errors})
+
+
+def add_warning(state: ExtractionState, warning: str) -> ExtractionState:
+    """Add a warning to the state."""
+    warnings = list(state.get("warnings", []))
+    warnings.append(warning)
+    return update_state(state, {"warnings": warnings})
+
+
+def increment_vlm_calls(state: ExtractionState, count: int = 1) -> ExtractionState:
+    """Increment the VLM call counter."""
+    current = state.get("total_vlm_calls", 0)
+    return update_state(state, {"total_vlm_calls": current + count})
+
+
+def set_status(
+    state: ExtractionState,
+    status: ExtractionStatus,
+    step: str | None = None,
+) -> ExtractionState:
+    """Update the extraction status."""
+    updates: dict[str, Any] = {"status": status.value}
+    if step:
+        updates["current_step"] = step
+    return update_state(state, updates)
+
+
+def complete_extraction(
+    state: ExtractionState,
+    final_output: dict[str, Any] | None = None,
+    overall_confidence: float | None = None,
+) -> ExtractionState:
+    """
+    Mark extraction as completed with final output.
+
+    Args:
+        state: Current extraction state.
+        final_output: Optional final output (defaults to merged_extraction).
+        overall_confidence: Optional confidence override (defaults to state value).
+
+    Returns:
+        Updated state marked as completed.
+    """
+    # Use provided values or defaults from state
+    if final_output is None:
+        final_output = state.get("merged_extraction", {})
+
+    if overall_confidence is None:
+        overall_confidence = state.get("overall_confidence", 0.0)
+
+    # Determine confidence level
+    confidence_level = ConfidenceLevel.HIGH
+    if overall_confidence < 0.85:
+        confidence_level = ConfidenceLevel.MEDIUM
+    if overall_confidence < 0.50:
+        confidence_level = ConfidenceLevel.LOW
+
+    return update_state(
+        state,
+        {
+            "status": ExtractionStatus.COMPLETED.value,
+            "current_step": "completed",
+            "final_output": final_output,
+            "overall_confidence": overall_confidence,
+            "confidence_level": confidence_level.value,
+            "end_time": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def request_human_review(
+    state: ExtractionState,
+    reason: str,
+) -> ExtractionState:
+    """Mark extraction as requiring human review."""
+    return update_state(
+        state,
+        {
+            "status": ExtractionStatus.HUMAN_REVIEW.value,
+            "current_step": "human_review",
+            "requires_human_review": True,
+            "human_review_reason": reason,
+            "end_time": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def request_retry(
+    state: ExtractionState,
+    reason: str | None = None,
+) -> ExtractionState:
+    """
+    Request extraction retry.
+
+    Args:
+        state: Current extraction state.
+        reason: Optional reason for retry.
+
+    Returns:
+        Updated state requesting retry or human review if max retries exceeded.
+    """
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", 2)
+
+    if retry_count >= max_retries:
+        return request_human_review(
+            state,
+            reason or f"Maximum retries ({max_retries}) exceeded with low confidence",
+        )
+
+    updates: dict[str, Any] = {
+        "status": ExtractionStatus.RETRYING.value,
+        "current_step": "retry_extraction",
+        "retry_count": retry_count + 1,
+    }
+
+    # Add reason as warning if provided
+    if reason:
+        warnings = list(state.get("warnings", []))
+        warnings.append(f"Retry requested: {reason}")
+        updates["warnings"] = warnings
+
+    return update_state(state, updates)
+
+
+def fail_extraction(state: ExtractionState, error: str) -> ExtractionState:
+    """Mark extraction as failed."""
+    state_with_error = add_error(state, error)
+    return update_state(
+        state_with_error,
+        {
+            "status": ExtractionStatus.FAILED.value,
+            "current_step": "failed",
+            "end_time": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def serialize_field_metadata(metadata: FieldMetadata) -> dict[str, Any]:
+    """Serialize FieldMetadata for state storage."""
+    return metadata.to_dict()
+
+
+def deserialize_field_metadata(data: dict[str, Any]) -> FieldMetadata:
+    """Deserialize FieldMetadata from state storage."""
+    bbox_data = data.get("bbox")
+    bbox = BoundingBoxCoords.from_dict(bbox_data) if bbox_data else None
+
+    return FieldMetadata(
+        field_name=data["field_name"],
+        value=data["value"],
+        confidence=data["confidence"],
+        pass1_value=data.get("pass1_value"),
+        pass2_value=data.get("pass2_value"),
+        passes_agree=data.get("passes_agree", True),
+        location_hint=data.get("location_hint", ""),
+        validation_passed=data.get("validation_passed", True),
+        validation_errors=tuple(data.get("validation_errors", [])),
+        source_page=data.get("source_page", 1),
+        is_hallucination_flag=data.get("is_hallucination_flag", False),
+        bbox=bbox,
+    )
+
+
+def serialize_page_extraction(extraction: PageExtraction) -> dict[str, Any]:
+    """Serialize PageExtraction for state storage."""
+    return extraction.to_dict()
+
+
+def deserialize_page_extraction(data: dict[str, Any]) -> PageExtraction:
+    """Deserialize PageExtraction from state storage."""
+    merged_fields = {}
+    for field_name, field_data in data.get("merged_fields", {}).items():
+        merged_fields[field_name] = deserialize_field_metadata(field_data)
+
+    return PageExtraction(
+        page_number=data["page_number"],
+        pass1_raw=data.get("pass1_raw", {}),
+        pass2_raw=data.get("pass2_raw", {}),
+        merged_fields=merged_fields,
+        extraction_time_ms=data.get("extraction_time_ms", 0),
+        vlm_calls=data.get("vlm_calls", 0),
+        errors=data.get("errors", []),
+    )
+
+
+def serialize_validation_result(result: ValidationResult) -> dict[str, Any]:
+    """Serialize ValidationResult for state storage."""
+    return result.to_dict()
+
+
+def deserialize_validation_result(data: dict[str, Any]) -> ValidationResult:
+    """Deserialize ValidationResult from state storage."""
+    return ValidationResult(
+        is_valid=data.get("is_valid", True),
+        overall_confidence=data.get("overall_confidence", 0.0),
+        confidence_level=ConfidenceLevel(data.get("confidence_level", "low")),
+        field_validations=data.get("field_validations", {}),
+        cross_field_validations=data.get("cross_field_validations", []),
+        hallucination_flags=data.get("hallucination_flags", []),
+        warnings=data.get("warnings", []),
+        errors=data.get("errors", []),
+        requires_retry=data.get("requires_retry", False),
+        requires_human_review=data.get("requires_human_review", False),
+        validation_time_ms=data.get("validation_time_ms", 0),
+    )
+
+
+def serialize_state(state: ExtractionState) -> dict[str, Any]:
+    """
+    Serialize ExtractionState for persistent storage.
+
+    Converts the TypedDict to a plain dictionary suitable for JSON serialization.
+
+    Args:
+        state: ExtractionState to serialize.
+
+    Returns:
+        Dictionary representation of the state.
+    """
+    # ExtractionState is already a dict-like TypedDict, but we ensure
+    # all nested structures are properly serializable
+    serialized: dict[str, Any] = dict(state)
+
+    # Ensure page_images are serializable (remove any non-serializable data)
+    if serialized.get("page_images"):
+        serialized["page_images"] = [
+            {k: v for k, v in img.items() if k != "image_bytes"}
+            for img in serialized["page_images"]
+        ]
+
+    return serialized
+
+
+def deserialize_state(data: dict[str, Any]) -> ExtractionState:
+    """
+    Deserialize ExtractionState from persistent storage.
+
+    Args:
+        data: Dictionary representation of the state.
+
+    Returns:
+        Reconstructed ExtractionState.
+    """
+    # Create ExtractionState from the dictionary
+    # TypedDict allows dict casting
+    return ExtractionState(**data)  # type: ignore

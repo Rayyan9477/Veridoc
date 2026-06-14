@@ -1,0 +1,29 @@
+Intelligent Document Extraction & Agent Observability Platform
+Copyright 2026 [name of copyright owner — e.g., Rayyan Ahmed / Nobility RCM]
+
+This product is licensed under the Apache License, Version 2.0 (the "License");
+see the LICENSE file in this repository for the full terms.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+This software depends on third-party open-source components, each governed by
+its own license. See LICENSING_AND_DEPENDENCIES.md for the full posture and
+SPDX identifiers. Notable attributions:
+
+- PDF rendering via PDFium (through pypdfium2) — Apache-2.0 / BSD-3-Clause,
+  © Google LLC and the PDFium authors. [Add once the pypdfium2 swap lands
+  per LICENSING_AND_DEPENDENCIES.md §3.4 Resolution B.]
+
+NOTE: This repository currently declares PyMuPDF (`fitz`), which is AGPL-3.0.
+Until that dependency is removed/replaced (see LICENSING_AND_DEPENDENCIES.md §3),
+this NOTICE and the Apache-2.0 LICENSE are not yet consistent with the bundled
+dependencies. Resolve the PyMuPDF blocker before any public release.
+
+------------------------------------------------------------------------------
+AI models
+------------------------------------------------------------------------------
+Foundation models (e.g., Amazon Nova Pro, Qwen3-VL) are accessed as a managed
+network service via Amazon Bedrock and are NOT redistributed with this software.
+Their use is governed by the applicable AWS Service Terms and per-model EULAs,
+not by this repository's license.

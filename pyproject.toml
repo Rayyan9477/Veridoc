@@ -1,0 +1,432 @@
+[build-system]
+requires = ["setuptools>=70.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc-extraction-system"
+version = "2.0.0"
+description = "HIPAA-compliant local agentic medical document extraction system"
+readme = "README.md"
+license = {text = "Proprietary"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Rayyan Ahmed"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Typing :: Typed",
+]
+keywords = [
+    "medical-extraction",
+    "document-processing",
+    "vlm",
+    "langgraph",
+    "hipaa",
+    "ocr",
+    "healthcare",
+]
+
+dependencies = [
+    # Agent Framework
+    "langchain>=1.0.0",
+    "langchain-core>=0.3.25",
+    "langchain-community>=0.3.12",
+    "langchain-openai>=0.2.14",
+    "langgraph>=0.2.60",
+    "langgraph-checkpoint>=2.0.10",
+    # Durable checkpointing — default backend in OrchestratorAgent.
+    "langgraph-checkpoint-sqlite>=2.0.0",
+
+    # Memory Layer
+    "mem0ai>=0.1.29",
+    "faiss-cpu>=1.9.0",
+    "sentence-transformers>=3.3.0",
+
+    # VLM Client
+    "openai>=1.55.0",
+    "tenacity>=9.0.0",
+    "httpx>=0.27.0",
+
+    # PDF / DOCX / DICOM / Image Processing
+    "PyMuPDF>=1.25.0",
+    "Pillow>=11.0.0",
+    "opencv-python>=4.10.0",
+    "numpy>=1.26.0",
+    "scikit-learn>=1.4.0",
+    # Imported by src/preprocessing/docx_processor.py and dicom_processor.py.
+    # Previously imported lazily without being declared, causing fresh installs
+    # to fail at runtime when those formats are routed.
+    "python-docx>=1.1.0",
+    "pydicom>=2.4.0",
+
+    # Data Validation
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+
+    # API Framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.17",
+    "starlette>=0.41.0",
+
+    # Task Queue
+    "celery>=5.4.0",
+    "kombu>=5.4.0",
+    "redis>=5.2.0",
+
+    # Security
+    "cryptography>=43.0.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "bcrypt>=4.2.0",
+
+    # Export
+    "openpyxl>=3.1.5",
+    "pandas>=2.2.0",
+    "xlsxwriter>=3.2.0",
+
+    # UI
+    "streamlit>=1.40.0",
+    "streamlit-extras>=0.4.0",
+
+    # Monitoring
+    "prometheus-client>=0.21.0",
+    "structlog>=24.4.0",
+    "python-json-logger>=2.0.7",
+
+    # Configuration
+    "python-dotenv>=1.0.1",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-xdist>=3.5.0",
+    "hypothesis>=6.100.0",
+    "black>=24.10.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.0",
+    "isort>=5.13.0",
+    "bandit>=1.7.0",
+    "safety>=3.0.0",
+]
+
+gpu = [
+    "faiss-gpu>=1.9.0",
+]
+
+# WS-6 - PHI mode (opt-in). Pulls torch + transformers (~500 MB on disk).
+# Air-gapped deployments without these packages fall back to the regex-only
+# redactor in src/security/phi_mask.py.
+phi = [
+    "transformers>=4.45.0",
+    "torch>=2.4.0",
+]
+
+# WS-7 - AI observability (opt-in). Phoenix runs locally on port 6006;
+# PostHog can target a self-hosted instance for product analytics.
+observability = [
+    "arize-phoenix>=5.0.0",
+    "openinference-instrumentation-langchain>=0.1.0",
+    "openinference-instrumentation-openai>=0.1.0",
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "posthog>=4.0.0",
+]
+
+# WS-8 - Validated FHIR R4 export (opt-in dependency for the FHIR exporter).
+fhir = [
+    "fhir.resources>=7.1.0",
+]
+
+# V3 Phase 0 — vLLM server-side stack. Optional because LM Studio remains
+# a first-class backend and many deployments will never touch vLLM. The
+# runtime client only needs the OpenAI SDK (already in core deps).
+# Install with: pip install -e ".[dev,vlm-server]" on a GPU host.
+vlm-server = [
+    "vllm>=0.7.0",
+    "xgrammar>=0.1.10",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/rayyanahmed/doc-extraction-system"
+"Bug Tracker" = "https://github.com/rayyanahmed/doc-extraction-system/issues"
+"Documentation" = "https://github.com/rayyanahmed/doc-extraction-system/docs"
+
+[project.scripts]
+doc-extract = "src.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed", "*.json", "*.yaml", "*.yml"]
+
+[tool.black]
+line-length = 100
+target-version = ['py311', 'py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    \.eggs
+    | \.git
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | _build
+    | buck-out
+    | build
+    | dist
+    | migrations
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "C4",     # flake8-comprehensions
+    "B",      # flake8-bugbear
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "PTH",    # flake8-use-pathlib
+    "ERA",    # eradicate
+    "PL",     # pylint
+    "RUF",    # Ruff-specific rules
+    "S",      # flake8-bandit (security)
+    "A",      # flake8-builtins
+    "COM",    # flake8-commas
+    "DTZ",    # flake8-datetimez
+    "T10",    # flake8-debugger
+    "EM",     # flake8-errmsg
+    "G",      # flake8-logging-format
+    "INP",    # flake8-no-pep420
+    "PIE",    # flake8-pie
+    "T20",    # flake8-print
+    "PYI",    # flake8-pyi
+    "RSE",    # flake8-raise
+    "RET",    # flake8-return
+    "SLF",    # flake8-self
+    "SLOT",   # flake8-slots
+    "TID",    # flake8-tidy-imports
+    "INT",    # flake8-gettext
+]
+ignore = [
+    "E501",    # line too long (handled by black)
+    "PLR0913", # too many arguments
+    "PLR2004", # magic value comparison
+    "PLR0912", # too many branches
+    "PLR0911", # too many return statements
+    "PLR0915", # too many statements
+    "S101",    # use of assert (needed for tests)
+    "COM812",  # missing trailing comma (conflicts with black)
+    "B008",    # function call in default argument (standard FastAPI Depends pattern)
+    "EM101",   # exception string literal (common in HTTP APIs)
+    "EM102",   # f-string in exception (common in HTTP APIs)
+    "TRY003",  # long exception message (security messages need detail)
+    "G004",    # logging f-string (common pattern)
+    "RET504",  # unnecessary assignment before return (readability)
+    "PLC0415", # import outside top-level (lazy imports are intentional)
+    "PTH123",  # builtin open (style preference)
+    "SIM102",  # collapsible-if (readability)
+    "SIM105",  # suppressible-exception (explicit is better)
+    "SIM108",  # if-else-block-instead-of-if-exp (readability)
+    "RUF015",  # unnecessary-iterable-allocation (readability)
+    "RUF012",  # mutable class default (common pattern in dataclasses)
+    "ARG001",  # unused function argument (interfaces)
+    "ARG002",  # unused method argument (interfaces)
+    "PYI036",  # bad exit annotation (common pattern)
+    "S110",    # try-except-pass (intentional silent handling)
+    "SLF001",  # private member access (internal APIs)
+    "TCH003",  # typing-only import (style preference); name is TCH003 in ruff <1.0
+    "A002",    # builtin argument shadowing (common names like id, type)
+    "DTZ007",  # datetime strptime without zone (handled elsewhere)
+    "PLW0603", # global statement (singleton patterns)
+    "B007",    # unused loop control variable
+    "SIM103",  # needless bool (readability)
+    "ERA001",  # commented-out code (documentation)
+    "S310",    # suspicious URL open (intentional)
+    "B904",    # raise without from (HTTP exceptions)
+    "PTH119",  # os.path.basename (compatibility)
+    "PTH118",  # os.path.join (compatibility)
+    "PTH120",  # os.path.dirname (compatibility)
+    "RUF005",  # collection literal concatenation (readability)
+    "S104",    # hardcoded bind all interfaces (dev server)
+    "PIE810",  # multiple starts/ends with (readability)
+    "PLR1714", # repeated equality comparison (readability)
+    "PYI034",  # non-self return type (factory patterns)
+    "RUF034",  # useless if-else (readability)
+    "S603",    # subprocess without shell (intentional)
+    "SIM117",  # multiple with statements (readability)
+    "C416",    # unnecessary comprehension (readability)
+    "DTZ003",  # call datetime utcnow (legacy code)
+    "DTZ005",  # datetime now without tzinfo (handled)
+    "PLW2901", # redefined loop name (intentional)
+    "PTH122",  # os.path.splitext (compatibility)
+    "RUF006",  # asyncio dangling task (intentional)
+    "E402",    # module import not at top (conditional imports)
+    "A005",    # stdlib module shadowing (intentional naming)
+    "RUF022",  # unsorted __all__ (groups by category)
+    "INP001",  # implicit namespace package (valid structure)
+    "S112",    # try-except-continue (intentional)
+    "S311",    # non-cryptographic random (not for security)
+    "S324",    # insecure hash (non-security use)
+    "S608",    # hardcoded SQL (safe internal queries)
+    "SIM101",  # duplicate isinstance (readability)
+    "UP035",   # deprecated import (compatibility)
+    "UP038",   # non-pep604-isinstance (removed in newer ruff, keep for local compatibility)
+    "F841",    # unused variable (intentional placeholders)
+    # "RUF059" removed — preview rule that doesn't exist in ruff <1.0.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "ARG", "PLR2004", "SLF001", "S105", "S106", "T201", "F841", "RUF012", "B011", "INP001"]
+"scripts/*" = ["T201", "S105", "S106", "INP001"]
+"src/__init__.py" = ["F401", "RUF022"]  # Package init patterns
+"src/api/*" = ["B904", "S105", "S106", "PLW0603", "ARG001", "ARG002"]  # HTTP patterns
+"src/agents/*" = ["ARG001", "ARG002", "RUF012", "PYI036", "SLF001"]  # Agent patterns
+"src/pipeline/*" = ["ARG001", "ARG002", "RUF012"]  # Pipeline patterns
+"src/schemas/*" = ["RUF012"]  # Schema patterns with mutable defaults
+"src/security/*" = ["S105", "S106", "PLW0603", "RUF012"]  # Security module patterns
+"src/monitoring/*" = ["S105", "S106", "F821"]  # Monitoring metrics patterns, lazy type imports
+"src/audit/*" = ["T201"]  # Audit module may use print for warnings
+"src/validation/*" = ["S105", "S106"]  # Validation reason codes are not passwords
+"src/memory/*" = ["F401"]  # Optional imports for feature detection
+"src/queue/*" = ["F401"]  # Module init with re-exports
+"src/security/audit.py" = ["T201"]  # Emergency audit warnings use print
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+show_column_numbers = true
+pretty = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+strict_optional = true
+warn_no_return = true
+namespace_packages = true
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = [
+    "cv2.*",
+    "fitz.*",
+    "celery.*",
+    "redis.*",
+    "streamlit.*",
+    "structlog.*",
+    "prometheus_client.*",
+    "mem0.*",
+    "faiss.*",
+    "sentence_transformers.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--strict-config",
+    "-p no:warnings",
+    "--tb=short",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "accuracy: marks tests as accuracy/golden dataset tests",
+    # WS-10: register the markers used by the test backfill streams so
+    # `pytest --strict-markers` doesn't reject them. Files / dirs:
+    #   tests/regression/  → regression: golden-dataset guard rails
+    #   tests/property/    → property:   Hypothesis-driven invariants
+    #   tests/contract/    → contract:   API / export shape snapshots
+    #   tests/performance/ → performance: throughput / memory bounds
+    #   tests/security/    → security:    PHI / SSRF / auth-bypass
+    "regression: marks tests as regression guard tests",
+    "security: marks tests as security tests",
+    "property: marks tests as property-based (hypothesis) tests",
+    "performance: marks tests as performance/load tests",
+    "contract: marks tests as API/export contract tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+parallel = true
+omit = [
+    "tests/*",
+    "scripts/*",
+    "*/__pycache__/*",
+    "*/migrations/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+precision = 2
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.bandit]
+exclude_dirs = ["tests", "scripts"]
+skips = ["B101", "B601"]
