@@ -198,6 +198,7 @@ MEDICAL_RCM = ProfileDescriptor(
     },
     enabled_emitters=("ccda", "x12_275"),
     confidence_floor=0.6,
+    doc_types=("CMS-1500", "UB-04", "EOB", "Superbill", "Encounter form"),
 )
 
 

@@ -127,6 +127,10 @@ class ProfileDescriptor:
     validator_packs: dict[str, str] = field(default_factory=dict)
     enabled_emitters: tuple[str, ...] = field(default_factory=tuple)
     confidence_floor: float = 0.6
+    # Human-readable document types this profile targets (e.g.
+    # ``("CMS-1500", "UB-04", "EOB")``). Declarative metadata for the
+    # UI / API only — detection is driven by ``signals``, not this list.
+    doc_types: tuple[str, ...] = field(default_factory=tuple)
 
     def to_serialisable(self) -> dict[str, object]:
         """Lossy summary safe for logs / UI / API responses."""
@@ -142,6 +146,7 @@ class ProfileDescriptor:
             "validator_packs": dict(self.validator_packs),
             "enabled_emitters": list(self.enabled_emitters),
             "confidence_floor": self.confidence_floor,
+            "doc_types": list(self.doc_types),
         }
 
 

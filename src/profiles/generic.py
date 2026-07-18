@@ -77,6 +77,7 @@ GENERIC_DOCUMENT = ProfileDescriptor(
     },
     enabled_emitters=(),
     confidence_floor=0.4,  # Low floor — generic *wants* to win on memos.
+    doc_types=("Invoice", "Contract", "Form", "Letter", "Memo"),
 )
 
 

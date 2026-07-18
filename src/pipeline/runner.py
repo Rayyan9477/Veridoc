@@ -37,6 +37,38 @@ from src.pipeline.state import (
 logger = get_logger(__name__)
 
 
+def _resolve_backend_client() -> LMStudioClient:
+    """Build the VLM client for the configured backend.
+
+    PipelineRunner historically constructed a default (localhost) LMStudioClient
+    and handed it to ``create_extraction_workflow`` / ``MultiRecordExtractor``.
+    Because the workflow factory uses a supplied client *verbatim*, that
+    silently bypassed the ``qwen_cloud`` backend selection — the running app
+    never actually reached Model Studio through the runner. Building the
+    backend-appropriate client here keeps the runner path in sync with the
+    orchestrator/API path so ``VLM_BACKEND=qwen_cloud`` works end-to-end.
+    """
+    settings = get_settings()
+    backend = getattr(getattr(settings, "vlm", None), "backend", None)
+    if getattr(backend, "value", backend) == "qwen_cloud":
+        try:
+            from src.client.backends.factory import get_backend
+            from src.client.backends.protocol import VLMRole
+
+            qc = settings.vlm.qwen_cloud
+            base_url, model = get_backend(settings).resolve(VLMRole.PRIMARY)
+            return LMStudioClient(
+                base_url=base_url,
+                model=model,
+                api_key=(qc.api_key.get_secret_value() if qc.api_key else None),
+            )
+        except Exception:
+            # Fall back to the default client; the workflow surfaces any real
+            # backend misconfiguration downstream.
+            pass
+    return LMStudioClient()
+
+
 class PipelineRunner:
     """
     Main entry point for running document extraction pipelines.
@@ -71,7 +103,7 @@ class PipelineRunner:
                 (deskew, denoise, CLAHE) before VLM extraction. Defaults to
                 settings value. Improves quality for scanned/faxed documents.
         """
-        self._client = client or LMStudioClient()
+        self._client = client if client is not None else _resolve_backend_client()
         self._enable_checkpointing = enable_checkpointing
         self._max_retries = max_retries
         self._dpi = dpi

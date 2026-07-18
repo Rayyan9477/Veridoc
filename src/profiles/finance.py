@@ -111,6 +111,7 @@ FINANCE = ProfileDescriptor(
     },
     enabled_emitters=(),
     confidence_floor=0.6,
+    doc_types=("W-2", "1099 (MISC/NEC/INT/DIV)", "Bank statement", "Invoice"),
 )
 
 

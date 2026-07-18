@@ -35,6 +35,19 @@ from src.evaluation.golden_dataset import (
     load_dataset,
     save_dataset,
 )
+from src.evaluation.harness import (
+    ABReport,
+    ExperimentConfig,
+    ExperimentReport,
+    RichExtraction,
+    apply_experiment_config,
+    build_extractor_fn,
+    build_mock_extractor,
+    build_rich_extractor_fn,
+    experiment_settings,
+    run_ab,
+    run_experiment,
+)
 from src.evaluation.metrics import (
     AggregateMetrics,
     DocumentMetrics,
@@ -86,4 +99,16 @@ __all__ = [
     "RegressionDetector",
     "save_baseline",
     "load_baseline",
+    # Experiment harness
+    "ExperimentConfig",
+    "ExperimentReport",
+    "RichExtraction",
+    "ABReport",
+    "run_experiment",
+    "run_ab",
+    "apply_experiment_config",
+    "experiment_settings",
+    "build_extractor_fn",
+    "build_rich_extractor_fn",
+    "build_mock_extractor",
 ]

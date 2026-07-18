@@ -92,6 +92,17 @@ class ResultStore:
             path=str(result_path),
         )
 
+        # Phase E — mirror the result to Alibaba OSS when configured. Best-effort:
+        # a disabled/failed OSS upload never affects the local save.
+        try:
+            from src.storage.oss_storage import get_oss_storage
+
+            oss = get_oss_storage()
+            if oss.enabled:
+                oss.upload_json(f"results/{processing_id}.json", result_with_meta)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         return result_path
 
     def get(self, processing_id: str) -> dict[str, Any] | None:
