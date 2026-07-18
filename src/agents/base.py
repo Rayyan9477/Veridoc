@@ -234,6 +234,90 @@ class BaseAgent(ABC):
         """
         raise NotImplementedError
 
+    def _resolve_model_override(self, role: VLMRole) -> str | None:
+        """Resolve the per-request model id for this agent (D2 rotation).
+
+        Precedence:
+          1. **Role-based model** — the agent's role (derived from its name,
+             so ``extractor_pass2``→SECONDARY and ``critic``→CRITIC regardless
+             of routing config) selects a distinct model via
+             ``settings.vlm.role_model``. This is the heterogeneity mechanism:
+             Extractor→A / Auditor→B / Critic→C.
+          2. **Task-axis routing** — when a ``ModelRouter`` is attached and no
+             role model resolved, fall back to ``route_for_agent`` (the pre-D2
+             behaviour, preserved byte-for-byte when ``role_models`` is empty
+             and the backend is not qwen_cloud).
+          3. ``None`` — the client's default model.
+
+        Never raises: routing is best-effort and must not fail an extraction.
+        """
+        # 1) role-based model (config-driven; works without a router)
+        try:
+            from src.client.model_router import role_for_agent_name
+
+            resolved_role = (
+                self._model_router.role_for_agent(self._name)
+                if self._model_router is not None
+                else role_for_agent_name(self._name)
+            )
+            role_model = self._settings.vlm.role_model(resolved_role)
+            if role_model:
+                self._logger.debug(
+                    "model_role_routed",
+                    agent=self._name,
+                    role=getattr(resolved_role, "value", resolved_role),
+                    selected_model=role_model,
+                )
+                return role_model
+        except Exception as exc:  # pragma: no cover - defensive
+            self._logger.warning(
+                "role_model_resolution_failed", agent=self._name, error=str(exc)
+            )
+
+        # 2) task-axis routing fallback (unchanged pre-D2 path)
+        if self._model_router is not None:
+            try:
+                decision = self._model_router.route_for_agent(self._name)
+                self._logger.debug(
+                    "model_routed",
+                    agent=self._name,
+                    selected_model=decision.model.name,
+                    is_fallback=decision.is_fallback,
+                    reason=decision.reason,
+                )
+                return decision.model.model_id
+            except Exception as exc:
+                self._logger.warning(
+                    "model_routing_failed_using_default",
+                    agent=self._name,
+                    error=str(exc),
+                )
+        return None
+
+    def _schema_response_format(self, schema_dict: dict[str, Any]) -> dict[str, Any]:
+        """Build the constrained-decoding ``response_format`` for a schema send.
+
+        Defaults to strict ``json_schema`` (unchanged pre-existing behaviour).
+        When the active backend is Qwen Cloud and ``force_json_object`` is set,
+        fall back to ``{"type": "json_object"}`` — DashScope / Model Studio
+        serves some models that reject strict json_schema, and json_object is
+        universally accepted (the schema is still enforced downstream by the
+        validator's re-validation pass).
+        """
+        try:
+            vlm = self._settings.vlm
+            backend = getattr(vlm.backend, "value", vlm.backend)
+            if backend == "qwen_cloud" and getattr(
+                vlm.qwen_cloud, "force_json_object", False
+            ):
+                return {"type": "json_object"}
+        except Exception:  # pragma: no cover - defensive; fall back to json_schema
+            pass
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "veridoc", "schema": schema_dict},
+        }
+
     def send_vision_request(
         self,
         image_data: str,
@@ -280,32 +364,10 @@ class BaseAgent(ABC):
             temperature=temperature,
         )
 
-        # WS-2: consult the model router (Phase 3C) when configured.
-        # The router maps the calling agent's name to a ``ModelTask`` and
-        # returns a ``RoutingDecision`` whose ``model.model_id`` is forwarded
-        # to LMStudioClient as a per-request override. When no router is
-        # configured, behaviour is unchanged: the client's default model is
-        # used.
-        model_override: str | None = None
-        if self._model_router is not None:
-            try:
-                decision = self._model_router.route_for_agent(self._name)
-                model_override = decision.model.model_id
-                self._logger.debug(
-                    "model_routed",
-                    agent=self._name,
-                    selected_model=decision.model.name,
-                    is_fallback=decision.is_fallback,
-                    reason=decision.reason,
-                )
-            except Exception as exc:
-                # Routing is best-effort — never fail the extraction over a
-                # routing decision. Fall through to the default client/model.
-                self._logger.warning(
-                    "model_routing_failed_using_default",
-                    agent=self._name,
-                    error=str(exc),
-                )
+        # D2: resolve the per-request model. Role-based rotation first
+        # (Extractor→A / Auditor→B / Critic→C via settings.vlm.role_model),
+        # then task-axis routing, then the client default. Best-effort.
+        model_override: str | None = self._resolve_model_override(role)
 
         # WS-7: wrap the VLM call in an observability span. The
         # dispatcher is a no-op when no sinks are configured, so this
@@ -360,10 +422,15 @@ class BaseAgent(ABC):
             self._total_processing_ms += response.latency_ms
 
             if _dispatcher is not None and _dispatcher.is_active:
+                # D3 — carry model + token cost + role so experiments can
+                # attribute latency and spend to the exact model each role ran.
                 _dispatcher.record_llm_call(
                     agent=self._name,
                     model=model_override,
+                    role=role.value,
                     latency_ms=response.latency_ms,
+                    tokens_in=response.prompt_tokens,
+                    tokens_out=response.completion_tokens,
                     request_id=request.request_id,
                 )
                 # V3 Phase 6 — canonical PostHog event for every VLM
@@ -475,23 +542,12 @@ class BaseAgent(ABC):
         # tests that mock ``self._client.send_vision_request`` directly
         # observe the schema kwarg without needing the backend factory.
         schema_dict = schema.model_json_schema()
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {"name": "veridoc", "schema": schema_dict},
-        }
+        response_format = self._schema_response_format(schema_dict)
 
-        # Optional model routing — same logic as send_vision_request.
-        model_override: str | None = None
-        if self._model_router is not None:
-            try:
-                decision = self._model_router.route_for_agent(self._name)
-                model_override = decision.model.model_id
-            except Exception as exc:
-                self._logger.warning(
-                    "model_routing_failed_using_default",
-                    agent=self._name,
-                    error=str(exc),
-                )
+        # D2: resolve the per-request model (role rotation → task routing →
+        # default). The resolved id is also stamped into the DecodingTrace
+        # below so experiments can see which model produced each pass.
+        model_override: str | None = self._resolve_model_override(role)
 
         try:
             from src.monitoring.observability import get_dispatcher
@@ -541,10 +597,14 @@ class BaseAgent(ABC):
             self._total_processing_ms += response.latency_ms
 
             if _dispatcher is not None and _dispatcher.is_active:
+                # D3 — carry model + token cost + role (see send_vision_request).
                 _dispatcher.record_llm_call(
                     agent=self._name,
                     model=model_override,
+                    role=role.value,
                     latency_ms=response.latency_ms,
+                    tokens_in=response.prompt_tokens,
+                    tokens_out=response.completion_tokens,
                     request_id=request.request_id,
                 )
 

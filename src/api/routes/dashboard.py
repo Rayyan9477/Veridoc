@@ -114,10 +114,24 @@ async def get_dashboard_metrics(
 
     timestamp = datetime.now(UTC).isoformat()
 
+    system = _get_system_metrics()
+    processing = _get_processing_metrics()
+    queue = _get_queue_metrics()
+
     return {
-        "system": _get_system_metrics(),
-        "processing": _get_processing_metrics(),
-        "queue": _get_queue_metrics(),
+        # Flat shape consumed by the frontend `DashboardMetrics` type.
+        "documents_processed_today": processing["documents_processed_today"],
+        "documents_processed_week": processing["documents_processed_week"],
+        "success_rate": processing["success_rate"],
+        "average_processing_time": processing["average_processing_time_ms"] / 1000.0,
+        "active_tasks": queue["active_tasks"],
+        "pending_tasks": queue["pending_tasks"],
+        "failed_tasks_today": 0,
+        "human_review_pending": 0,
+        # Nested detail retained for richer widgets / backwards compatibility.
+        "system": system,
+        "processing": processing,
+        "queue": queue,
         "timestamp": timestamp,
     }
 

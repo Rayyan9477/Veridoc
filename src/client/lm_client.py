@@ -267,6 +267,7 @@ class LMStudioClient:
         max_retries: int | None = None,
         retry_min_wait: int | None = None,
         retry_max_wait: int | None = None,
+        api_key: str | None = None,
     ) -> None:
         """
         Initialize the LM Studio client.
@@ -292,6 +293,17 @@ class LMStudioClient:
         self._retry_min_wait = retry_min_wait or settings.lm_studio.retry_min_wait
         self._retry_max_wait = retry_max_wait or settings.lm_studio.retry_max_wait
 
+        # API key for authenticated backends (e.g. Qwen Cloud / Model Studio).
+        # Falls back to the LM_STUDIO_API_KEY setting, then to "not-needed" for
+        # local servers (LM Studio) that ignore auth. Backward-compatible.
+        _cfg_key = getattr(settings.lm_studio, "api_key", "")
+        _cfg_key = (
+            _cfg_key.get_secret_value()
+            if hasattr(_cfg_key, "get_secret_value")
+            else (_cfg_key or "")
+        )
+        self._api_key = api_key or _cfg_key or "not-needed"
+
         # Thread-local storage for OpenAI clients (thread-safety for concurrent requests)
         # Each thread gets its own client to avoid connection pool conflicts
         self._thread_local = threading.local()
@@ -303,10 +315,22 @@ class LMStudioClient:
         self._async_client: AsyncOpenAI | None = None
         self._async_client_lock = asyncio.Lock()
 
-        # HTTP client for health checks
+        # HTTP client for health checks. Strip a trailing "/v1" as a suffix
+        # (not a char-set, unlike str.rstrip) so "/v1/models" resolves
+        # correctly, and attach a Bearer header when an API key is configured
+        # (authenticated cloud backends such as Qwen Cloud).
+        _health_base = (
+            self._base_url[:-3] if self._base_url.endswith("/v1") else self._base_url
+        )
+        _health_headers = (
+            {"Authorization": f"Bearer {self._api_key}"}
+            if self._api_key and self._api_key != "not-needed"
+            else {}
+        )
         self._http_client = httpx.Client(
-            base_url=self._base_url.rstrip("/v1"),
+            base_url=_health_base,
             timeout=10.0,
+            headers=_health_headers,
         )
 
         # Track if closed
@@ -357,7 +381,7 @@ class LMStudioClient:
                 if not hasattr(self._thread_local, "client"):
                     self._thread_local.client = OpenAI(
                         base_url=self._base_url,
-                        api_key="not-needed",  # LM Studio doesn't require API key
+                        api_key=self._api_key,
                         timeout=float(self._timeout),
                         max_retries=0,  # We handle retries ourselves
                     )
@@ -736,7 +760,7 @@ class LMStudioClient:
                 if self._async_client is None:
                     self._async_client = AsyncOpenAI(
                         base_url=self._base_url,
-                        api_key="not-needed",
+                        api_key=self._api_key,
                         timeout=float(self._timeout),
                         max_retries=0,
                     )

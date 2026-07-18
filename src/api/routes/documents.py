@@ -1092,6 +1092,38 @@ async def get_document_page_image(
 
 
 @router.get(
+    "/documents",
+    summary="List processed documents",
+    description=(
+        "List recently processed documents from the result store, newest "
+        "first. Returns ProcessResponse-shaped records the dashboard and "
+        "Documents screen consume directly."
+    ),
+)
+async def list_documents(
+    http_request: Request,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """List stored extraction results (full records, newest first)."""
+    from src.storage.result_store import get_result_store
+
+    request_id = getattr(http_request.state, "request_id", "")
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    store = get_result_store()
+    out: list[dict[str, Any]] = []
+    for summary in store.list_results(limit=limit, offset=offset):
+        pid = summary.get("processing_id")
+        full = store.get(pid) if isinstance(pid, str) else None
+        out.append(full if isinstance(full, dict) else summary)
+
+    logger.info("list_documents_request", request_id=request_id, count=len(out))
+    return out
+
+
+@router.get(
     "/documents/{processing_id}/provenance",
     summary="Get provenance map (V3 Phase 4)",
     description=(

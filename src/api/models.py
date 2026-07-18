@@ -469,6 +469,25 @@ class SchemaSaveRequest(BaseModel):
     schema_name: str | None = Field(None, description="Override schema name")
 
 
+class SchemaPersistRequest(BaseModel):
+    """Request model for creating/updating a file-backed schema.
+
+    Used by the Schema Designer's Save action. ``fields`` is kept as a
+    list of loosely-typed dicts so the designer's rich field shape
+    (examples, allowed_values, validators, …) round-trips without the
+    API model having to enumerate every optional attribute.
+    """
+
+    name: str = Field(..., min_length=1, max_length=64, description="Schema name / id")
+    description: str = Field("", description="Schema description")
+    document_type: str = Field("", description="Target document type")
+    version: str = Field("1.0.0", description="Schema version")
+    fields: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Field definitions (name/type/required/description/…)",
+    )
+
+
 class SchemaProposalResponse(BaseModel):
     """Response model for schema proposal operations."""
 

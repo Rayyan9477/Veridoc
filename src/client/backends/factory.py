@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from src.client.backends.gemma_backend import GemmaBackend
 from src.client.backends.lm_studio_backend import LMStudioBackend
+from src.client.backends.qwen_cloud_backend import QwenCloudBackend
 from src.client.backends.protocol import VLMBackend
 from src.client.backends.vllm_backend import VLLMBackend
 from src.config import get_logger, get_settings
@@ -58,10 +59,12 @@ def get_backend(settings: "Settings | None" = None) -> VLMBackend:
             backend = _build_vllm_backend(settings)
         elif backend_name == "gemma":
             backend = _build_gemma_backend(settings)
+        elif backend_name == "qwen_cloud":
+            backend = _build_qwen_cloud_backend(settings)
         else:
             raise ValueError(
                 f"Unsupported VLM_BACKEND: {backend_name!r}. "
-                f"Expected 'lm_studio', 'vllm', or 'gemma'."
+                f"Expected 'lm_studio', 'vllm', 'gemma', or 'qwen_cloud'."
             )
 
         logger.info(
@@ -167,4 +170,37 @@ def _build_gemma_backend(settings: "Settings") -> GemmaBackend:
         temperature=cfg.temperature,
         register_rcm_tools=cfg.register_rcm_tools,
         fail_open_on_health=cfg.fail_open_on_health,
+    )
+
+
+def _build_qwen_cloud_backend(settings: "Settings") -> QwenCloudBackend:
+    """Phase Q — instantiate the Qwen Cloud (Alibaba Model Studio) backend.
+
+    Reads ``settings.vlm.qwen_cloud`` for the OpenAI-compatible endpoint, API
+    key, and per-role Qwen model ids; shares the legacy LM Studio retry/timeout
+    knobs so operators tune them in one place.
+    """
+    cfg = settings.vlm.qwen_cloud
+    legacy = settings.lm_studio  # share retry/timeout knobs
+
+    api_key = cfg.api_key.get_secret_value() if cfg.api_key else ""
+    if not cfg.primary_url or not cfg.primary_model or not api_key:
+        raise ValueError(
+            "VLM_BACKEND=qwen_cloud requires VLM_QWEN_CLOUD_PRIMARY_URL, "
+            "VLM_QWEN_CLOUD_PRIMARY_MODEL, and VLM_QWEN_CLOUD_API_KEY."
+        )
+
+    return QwenCloudBackend(
+        primary_url=cfg.primary_url,
+        api_key=api_key,
+        primary_model=cfg.primary_model,
+        secondary_model=cfg.secondary_model,
+        critic_model=cfg.critic_model,
+        force_json_object=cfg.force_json_object,
+        max_tokens=legacy.max_tokens,
+        temperature=legacy.temperature,
+        timeout=legacy.timeout,
+        max_retries=legacy.max_retries,
+        retry_min_wait=legacy.retry_min_wait,
+        retry_max_wait=legacy.retry_max_wait,
     )

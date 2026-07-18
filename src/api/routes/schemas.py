@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from src.api.models import (
     SchemaInfo,
     SchemaListResponse,
+    SchemaPersistRequest,
     SchemaProposalResponse,
     SchemaRefineRequest,
     SchemaSaveRequest,
@@ -80,24 +81,41 @@ async def list_schemas(
 
     try:
         from src.schemas import get_all_schemas
+        from src.storage.schema_store import get_schema_store
 
         all_schemas = get_all_schemas()
-        schemas = []
+        by_name: dict[str, SchemaInfo] = {}
         for schema in all_schemas:
             # Handle both DocumentSchema objects and dict schemas
             if hasattr(schema, "name"):
-                schemas.append(
-                    SchemaInfo(
-                        name=schema.name,
-                        description=getattr(schema, "description", ""),
-                        document_type=getattr(schema, "document_type", schema.name),
-                        field_count=len(getattr(schema, "fields", [])),
-                        version=getattr(schema, "version", "1.0.0"),
-                    )
+                info = SchemaInfo(
+                    name=schema.name,
+                    description=getattr(schema, "description", ""),
+                    document_type=getattr(schema, "document_type", schema.name),
+                    field_count=len(getattr(schema, "fields", [])),
+                    version=getattr(schema, "version", "1.0.0"),
                 )
+                by_name[info.name] = info
             elif isinstance(schema, dict):
-                schemas.append(_get_schema_info(schema.get("name", "unknown"), schema))
+                info = _get_schema_info(schema.get("name", "unknown"), schema)
+                by_name[info.name] = info
 
+        # Merge in file-backed (authored) schemas. A stored schema with
+        # the same name shadows the code schema — the operator's
+        # override is what they'll want to see and edit.
+        for record in get_schema_store().list_all():
+            name = record.get("name")
+            if not name:
+                continue
+            by_name[name] = SchemaInfo(
+                name=name,
+                description=record.get("description", ""),
+                document_type=record.get("document_type", name),
+                field_count=record.get("field_count", len(record.get("fields", []))),
+                version=record.get("version", "1.0.0"),
+            )
+
+        schemas = list(by_name.values())
         return SchemaListResponse(
             schemas=schemas,
             count=len(schemas),
@@ -147,6 +165,15 @@ async def get_schema(
     )
 
     try:
+        # Prefer an authored (file-backed) schema so the designer loads
+        # a saved draft — with its edited fields — rather than the code
+        # schema it was cloned from.
+        from src.storage.schema_store import get_schema_store
+
+        stored = get_schema_store().get(schema_name)
+        if stored is not None:
+            return stored
+
         from src.schemas import get_schema
 
         schema = get_schema(schema_name)
@@ -156,6 +183,10 @@ async def get_schema(
                 detail=f"Schema not found: {schema_name}",
             )
 
+        # ``get_schema`` returns a ``DocumentSchema`` dataclass; the designer
+        # (and response_model=dict) consume JSON, so serialise via to_dict().
+        if hasattr(schema, "to_dict"):
+            return schema.to_dict()
         return schema
 
     except HTTPException:
@@ -235,6 +266,88 @@ async def get_schema_fields(
             status_code=500,
             detail=f"Failed to get schema fields: {e!s}",
         )
+
+
+@router.post(
+    "/schemas",
+    response_model=dict[str, Any],
+    summary="Create or update a schema",
+    description=(
+        "Persist a file-backed extraction schema (Schema Designer "
+        "'Save'). Saving always lands the schema in 'draft' status; "
+        "publishing is a separate step. A saved schema shadows a "
+        "same-named code schema in listings."
+    ),
+)
+async def save_schema(
+    body: SchemaPersistRequest,
+    http_request: Request,
+) -> dict[str, Any]:
+    """Create or update an authored schema in the file store."""
+    request_id = getattr(http_request.state, "request_id", "")
+
+    logger.info(
+        "persist_schema_request",
+        request_id=request_id,
+        schema_name=body.name,
+        field_count=len(body.fields),
+    )
+
+    from src.storage.schema_store import SchemaStoreError, get_schema_store
+
+    try:
+        record = get_schema_store().save(
+            body.name,
+            description=body.description,
+            document_type=body.document_type,
+            version=body.version,
+            fields=body.fields,
+        )
+    except SchemaStoreError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"status": "saved", "schema": record}
+
+
+@router.post(
+    "/schemas/{schema_name}/publish",
+    response_model=dict[str, Any],
+    summary="Publish a schema",
+    description=(
+        "Flip an authored (file-backed) schema from 'draft' to "
+        "'published'. Returns 404 if no such authored schema exists."
+    ),
+)
+async def publish_schema(
+    schema_name: str,
+    http_request: Request,
+) -> dict[str, Any]:
+    """Publish an authored schema (draft → published)."""
+    request_id = getattr(http_request.state, "request_id", "")
+
+    logger.info(
+        "publish_schema_request",
+        request_id=request_id,
+        schema_name=schema_name,
+    )
+
+    from src.storage.schema_store import SchemaStoreError, get_schema_store
+
+    try:
+        record = get_schema_store().publish(schema_name)
+    except SchemaStoreError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No authored schema named {schema_name!r} to publish. "
+                "Save it first."
+            ),
+        )
+
+    return {"status": "published", "schema": record}
 
 
 @router.post(

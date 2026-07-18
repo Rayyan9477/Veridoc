@@ -51,7 +51,7 @@ def _safe_request_id(raw: str | None) -> str:
 
 
 API_VERSION = "1.0.0"
-API_TITLE = "PDF Document Extraction API"
+API_TITLE = "Veridoc API"
 API_DESCRIPTION = """
 ## Document Extraction API
 
@@ -416,13 +416,17 @@ def create_app(
         )
 
     # Register routes
+    from src.api.routes.audit import router as audit_router
     from src.api.routes.auth import router as auth_router
     from src.api.routes.dashboard import router as dashboard_router
     from src.api.routes.documents import router as documents_router
     from src.api.routes.health import router as health_router
+    from src.api.routes.profiles import router as profiles_router
     from src.api.routes.queue import router as queue_router
+    from src.api.routes.review import router as review_router
     from src.api.routes.schemas import router as schemas_router
     from src.api.routes.tasks import router as tasks_router
+    from src.api.routes.users import router as users_router
     from src.api.routes.webhooks import router as webhooks_router
 
     app.include_router(auth_router, prefix="/api/v1", tags=["Authentication"])
@@ -433,13 +437,17 @@ def create_app(
     app.include_router(dashboard_router, prefix="/api/v1", tags=["Dashboard"])
     app.include_router(queue_router, prefix="/api/v1", tags=["Queue"])
     app.include_router(webhooks_router, prefix="/api/v1", tags=["Webhooks"])
+    app.include_router(profiles_router, prefix="/api/v1", tags=["Profiles"])
+    app.include_router(audit_router, prefix="/api/v1", tags=["Audit"])
+    app.include_router(review_router, prefix="/api/v1", tags=["Review"])
+    app.include_router(users_router, prefix="/api/v1", tags=["Users"])
 
     # Root endpoint
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, str]:
         """Root endpoint redirect to docs."""
         return {
-            "message": "PDF Document Extraction API",
+            "message": "Veridoc API",
             "version": API_VERSION,
             "docs": "/docs",
         }

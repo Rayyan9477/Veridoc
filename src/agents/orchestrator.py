@@ -123,6 +123,7 @@ class OrchestratorAgent(BaseAgent):
         max_retries: int = 2,
         high_confidence_threshold: float = 0.85,
         low_confidence_threshold: float = 0.50,
+        learning_loop: Any = None,
     ) -> None:
         """
         Initialize the Orchestrator agent.
@@ -136,6 +137,9 @@ class OrchestratorAgent(BaseAgent):
             max_retries: Maximum retry attempts for failed extractions.
             high_confidence_threshold: Threshold for auto-acceptance.
             low_confidence_threshold: Threshold below which human review is required.
+            learning_loop: Optional D1 ``HitlLearningLoop``. When present,
+                reviewer corrections train the calibrator and correction
+                memory (opt-in via settings.calibration.online_learning).
 
         Note:
             - memory: Use for development/testing only (data lost on restart)
@@ -154,6 +158,8 @@ class OrchestratorAgent(BaseAgent):
         self._max_retries = max_retries
         self._high_confidence_threshold = high_confidence_threshold
         self._low_confidence_threshold = low_confidence_threshold
+        # D1 — optional HITL learning loop (calibration + correction memory).
+        self._learning_loop = learning_loop
 
         # Agent instances - injected via build_workflow()
         # These are NOT lazy loaded. They're passed in when build_workflow() is called
@@ -766,6 +772,13 @@ class OrchestratorAgent(BaseAgent):
                         f"tenant:{tenant_id}:proc:{proc_id}"
                     )
                 config["configurable"] = configurable
+
+            # The dual-VLM + vlm-first + Critic pipeline is many nodes deep per
+            # pass; with the retry budget it can exceed LangGraph's default
+            # recursion_limit of 25. Scale the ceiling to the retry budget so a
+            # legitimately deep run reaches a terminal state instead of raising
+            # GraphRecursionError.
+            config["recursion_limit"] = max(50, (self._max_retries + 1) * 20)
 
             # Run the workflow
             final_state = self._compiled_workflow.invoke(initial_state, config)
@@ -1543,6 +1556,13 @@ class OrchestratorAgent(BaseAgent):
             field_corrections = {}
 
         merged_extraction = dict(state.get("merged_extraction", {}) or {})
+        # Snapshot the pre-correction envelopes (with their ORIGINAL
+        # confidences) so the D1 learning loop can score raw confidence vs.
+        # reviewer ground truth before we overwrite confidence to 1.0 below.
+        original_extraction = {
+            k: (dict(v) if isinstance(v, dict) else v)
+            for k, v in merged_extraction.items()
+        }
         for field_name, corrected_value in field_corrections.items():
             existing = merged_extraction.get(field_name)
             if isinstance(existing, dict):
@@ -1561,6 +1581,25 @@ class OrchestratorAgent(BaseAgent):
             processing_id=state.get("processing_id"),
             corrected_fields=list(field_corrections.keys()),
         )
+
+        # D1 — feed the HITL learning loop (best-effort; only wired when
+        # settings.calibration.online_learning is on). Trains the calibrator
+        # (raw confidence vs. reviewer ground truth) and records changed
+        # fields to correction memory so the next extraction is warned.
+        if self._learning_loop is not None:
+            try:
+                self._learning_loop.learn_from_review(
+                    original_extraction=original_extraction,
+                    field_corrections=field_corrections,
+                    document_type=state.get("document_type", "") or "",
+                    profile=(
+                        state.get("profile")
+                        or state.get("document_type")
+                        or "_global"
+                    ),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self._logger.warning("hitl_learning_loop_failed", error=str(exc))
 
         state = update_state(
             state,
@@ -1643,8 +1682,26 @@ def create_extraction_workflow(
 
     settings = get_settings()
 
-    # Create shared client
-    shared_client = client or LMStudioClient()
+    # Create shared client. When the operator selects the Qwen Cloud backend,
+    # build the live client from the factory-resolved PRIMARY endpoint + key so
+    # the running app actually talks to Model Studio. Per-agent model selection
+    # still flows through the ModelRouter / role rotation; this client supplies
+    # the endpoint, auth, and default model.
+    if client is not None:
+        shared_client = client
+    elif settings.vlm.backend == "qwen_cloud":
+        from src.client.backends.factory import get_backend
+        from src.client.backends.protocol import VLMRole
+
+        _qwen = settings.vlm.qwen_cloud
+        _base_url, _model = get_backend(settings).resolve(VLMRole.PRIMARY)
+        shared_client = LMStudioClient(
+            base_url=_base_url,
+            model=_model,
+            api_key=(_qwen.api_key.get_secret_value() if _qwen.api_key else None),
+        )
+    else:
+        shared_client = LMStudioClient()
 
     # --- Multi-model routing (Phase 3C, opt-in via settings) ---
     # When enabled, agents consult the router in BaseAgent.send_vision_request
@@ -1713,13 +1770,42 @@ def create_extraction_workflow(
         except Exception as e:
             logger.warning("calibration_init_failed", error=str(e))
 
+    # --- D1 HITL learning loop (opt-in via calibration.online_learning) ---
+    # Reuses the calibrator built above so validator calibration and HITL
+    # training share one model + storage path. Returns a no-op triple when
+    # the flag is off, keeping today's behaviour byte-identical.
+    learning_loop = None
+    correction_tracker = None
+    history_lookup = None
+    try:
+        from src.memory.learning_loop import build_learning_loop
+
+        learning_loop, correction_tracker, history_lookup = build_learning_loop(
+            settings, calibrator=calibrator
+        )
+        if learning_loop is not None:
+            logger.info(
+                "hitl_learning_loop_enabled",
+                has_tracker=correction_tracker is not None,
+                has_history_lookup=history_lookup is not None,
+            )
+    except Exception as e:
+        logger.warning("learning_loop_init_failed", error=str(e))
+
     # --- Dynamic prompt enhancement (always created — lightweight) ---
+    # When online learning is on, the enhancer is backed by the correction
+    # tracker so learned warnings inject into the next extraction's prompt;
+    # otherwise tracker is None and the enhancer is a pass-through (today's
+    # behaviour).
     prompt_enhancer = None
     try:
         from src.memory.dynamic_prompt import DynamicPromptEnhancer
 
-        prompt_enhancer = DynamicPromptEnhancer()
-        logger.info("prompt_enhancer_created")
+        prompt_enhancer = DynamicPromptEnhancer(tracker=correction_tracker)
+        logger.info(
+            "prompt_enhancer_created",
+            tracker_backed=correction_tracker is not None,
+        )
     except Exception as e:
         logger.warning("prompt_enhancer_init_failed", error=str(e))
 
@@ -1845,6 +1931,7 @@ def create_extraction_workflow(
                 reconciler = HeterogeneousReconciler(
                     backend=None,
                     roundtrip_helper=perform_bbox_roundtrip,
+                    history_lookup=history_lookup,
                 )
                 pass1 = state.get("pass1_result", {}) or {}
                 pass2 = state.get("pass2_result", {}) or {}
@@ -1980,6 +2067,41 @@ def create_extraction_workflow(
                     "tiebreakers_used": tiebreakers,
                     "total_fields": total_fields,
                 }
+
+                # D3 — expose the reconciler's per-document disagreement signal
+                # on the observability plane so experiments can pivot on
+                # model↔disagreement↔outcome. Best-effort + no-op when no sink
+                # is active (the default), so extraction is never affected.
+                try:
+                    from src.monitoring.observability import (
+                        SPAN_RECONCILER,
+                        build_pass_span_attrs,
+                        get_dispatcher,
+                    )
+
+                    _disp = get_dispatcher()
+                    if _disp is not None and getattr(_disp, "is_active", False):
+                        _disp.emit_event(
+                            SPAN_RECONCILER,
+                            build_pass_span_attrs(
+                                pass_name="reconciler",
+                                document_type=(
+                                    doc_type if isinstance(doc_type, str) else None
+                                ),
+                                extra={
+                                    "agreement_rate": agreement_rate,
+                                    "disagreements": disagreements,
+                                    "total_fields": total_fields,
+                                    "tiebreakers_used": (
+                                        sum(tiebreakers.values()) if tiebreakers else 0
+                                    ),
+                                    "pass1_model_id": pass1_model_id or None,
+                                    "pass2_model_id": pass2_model_id or None,
+                                },
+                            ),
+                        )
+                except Exception:  # pragma: no cover - observability is best-effort
+                    pass
                 update: dict[str, Any] = {
                     "merged_extraction_v2": merged_v2,
                     "provenance_index": provenance_index,
@@ -2014,6 +2136,7 @@ def create_extraction_workflow(
         client=shared_client,
         enable_checkpointing=enable_checkpointing,
         max_retries=max_retries,
+        learning_loop=learning_loop,
     )
 
     # V3 Phase 3 — Critic agent + combiner. Independent of dual-VLM:
@@ -2045,6 +2168,32 @@ def create_extraction_workflow(
                     "confidence_components": components,
                     "overall_confidence": components["raw_combined"],
                 }
+
+                # D3 — expose the Critic's confidence components on the
+                # observability plane (best-effort; no-op without a sink).
+                try:
+                    from src.monitoring.observability import (
+                        SPAN_CRITIC,
+                        build_pass_span_attrs,
+                        get_dispatcher,
+                    )
+
+                    _disp = get_dispatcher()
+                    if _disp is not None and getattr(_disp, "is_active", False):
+                        _disp.emit_event(
+                            SPAN_CRITIC,
+                            build_pass_span_attrs(
+                                pass_name="critic",
+                                document_type=state.get("document_type"),
+                                extra={
+                                    "raw_combined": components.get("raw_combined"),
+                                    "confidence_components": components,
+                                },
+                            ),
+                        )
+                except Exception:  # pragma: no cover - observability is best-effort
+                    pass
+
                 # Recompute confidence_level so the route node sees a
                 # consistent (level, score) pair.
                 from src.pipeline.state import ConfidenceLevel
