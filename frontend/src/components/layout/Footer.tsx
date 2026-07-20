@@ -3,44 +3,40 @@
 import React from 'react';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
+import { BRANDING, copyrightLine } from '@/lib/branding';
 
 interface FooterProps {
   className?: string;
 }
 
 const Footer: React.FC<FooterProps> = ({ className }) => {
-  const currentYear = new Date().getFullYear();
-
   return (
-    <footer
-      className={cn(
-        'bg-white border-t border-surface-200 py-4 px-6',
-        className
-      )}
-    >
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div className="text-sm text-surface-500">
-          &copy; {currentYear} PDF Document Extraction System. All rights reserved.
-        </div>
+    <footer className={cn('border-t border-border-default py-4 px-6', className)}>
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+        <p className="text-small text-text-muted">{copyrightLine()}</p>
         <div className="flex items-center gap-6">
           <Link
-            href="/privacy"
-            className="text-sm text-surface-500 hover:text-surface-700 transition-colors"
+            href="/help"
+            className="text-small text-text-muted hover:text-text-secondary transition-colors"
           >
-            Privacy Policy
+            Help
           </Link>
-          <Link
-            href="/terms"
-            className="text-sm text-surface-500 hover:text-surface-700 transition-colors"
-          >
-            Terms of Service
-          </Link>
-          <Link
-            href="/docs"
-            className="text-sm text-surface-500 hover:text-surface-700 transition-colors"
+          <a
+            href={BRANDING.docsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-small text-text-muted hover:text-text-secondary transition-colors"
           >
             Documentation
-          </Link>
+          </a>
+          <a
+            href={BRANDING.statusUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-small text-text-muted hover:text-text-secondary transition-colors"
+          >
+            Status
+          </a>
         </div>
       </div>
     </footer>

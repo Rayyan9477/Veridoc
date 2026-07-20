@@ -1,4 +1,4 @@
-// API Types for PDF Document Extraction System
+// API Types for Veridoc
 
 // Enums
 export type TaskStatus =
@@ -252,6 +252,12 @@ export interface DashboardMetrics {
   pending_tasks: number;
   failed_tasks_today: number;
   human_review_pending: number;
+  /** Nested system-resource block (also returned flat above). */
+  system?: {
+    cpu_usage: number;
+    memory_usage: number;
+    disk_usage: number;
+  };
 }
 
 // Recent Activity

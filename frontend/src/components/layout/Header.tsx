@@ -2,196 +2,88 @@
 
 import React from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
-import { usePathname } from 'next/navigation';
-import {
-  FileText,
-  Bell,
-  User,
-  Search,
-  Menu,
-  Settings,
-  LogOut,
-  ChevronDown,
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { Button, Dropdown } from '@/components/ui';
+import { useRouter, usePathname } from 'next/navigation';
+import { ChevronDown, HelpCircle, LogOut, Menu, Search, Settings } from 'lucide-react';
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { BRANDING } from '@/lib/branding';
+import { Dropdown } from '@/components/ui';
+import { pageTitleForPath } from './nav-config';
 
 interface HeaderProps {
   onMenuClick?: () => void;
-  user?: {
-    name: string;
-    email: string;
-    avatar?: string;
-  };
-  notifications?: number;
+  user?: { name: string; email: string };
+  onSignOut?: () => void;
 }
 
-const Header: React.FC<HeaderProps> = ({ onMenuClick, user, notifications = 0 }) => {
-  const pathname = usePathname();
+const openPalette = () =>
+  window.dispatchEvent(new Event('veridoc:open-command-palette'));
 
-  const getPageTitle = () => {
-    const titles: Record<string, string> = {
-      '/': 'Dashboard',
-      '/dashboard': 'Dashboard',
-      '/documents': 'Documents',
-      '/documents/upload': 'Upload Document',
-      '/tasks': 'Task Queue',
-      '/settings': 'Settings',
-    };
-    return titles[pathname] || BRANDING.productName;
-  };
+export default function Header({ onMenuClick, user, onSignOut }: HeaderProps) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const title = pageTitleForPath(pathname);
+  const initials = (user?.name ?? 'VD').slice(0, 2).toUpperCase();
 
   return (
-    <header className="sticky top-0 z-40 bg-surface/80 backdrop-blur-lg border-b border-default">
-      <div className="flex items-center justify-between h-16 px-4 lg:px-6">
-        {/* Left Section */}
-        <div className="flex items-center gap-4">
-          {/* Mobile Menu Toggle */}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onMenuClick}
-            aria-label="Open navigation menu"
-            className="lg:hidden"
-          >
-            <Menu className="h-5 w-5" aria-hidden="true" />
-          </Button>
+    <header
+      className="sticky top-0 z-30 h-16 flex items-center gap-3 px-4 lg:px-6 border-b border-border-default backdrop-blur-xl"
+      style={{ background: 'rgb(var(--bg-canvas-rgb) / 0.55)' }}
+    >
+      <button onClick={onMenuClick} aria-label="Open navigation" className="btn-ghost p-2 lg:hidden">
+        <Menu className="w-5 h-5" aria-hidden />
+      </button>
 
-          {/* Logo (Mobile) */}
-          <Link
-            href="/"
-            aria-label={`${BRANDING.productName} home`}
-            className="flex items-center gap-2 lg:hidden"
-          >
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center">
-              <FileText className="w-5 h-5 text-white" aria-hidden="true" />
-            </div>
-          </Link>
+      <h1 className="font-display text-h2 font-semibold text-text-primary shrink-0">{title}</h1>
 
-          {/* Page Title */}
-          <div className="hidden sm:block">
-            <h1 className="text-h2 text-text-primary">
-              {getPageTitle()}
-            </h1>
-          </div>
-        </div>
+      {/* ⌘K search trigger */}
+      <button
+        onClick={openPalette}
+        className="ml-2 hidden md:flex items-center gap-2 flex-1 max-w-md h-9 px-3 rounded-xl glass-hairline text-text-muted hover:text-text-secondary transition-colors duration-fast"
+        style={{ background: 'rgb(var(--bg-surface-rgb) / 0.4)' }}
+        aria-label="Open command palette"
+      >
+        <Search className="w-4 h-4" aria-hidden />
+        <span className="text-body">Search or jump to…</span>
+        <kbd className="ml-auto text-[0.65rem] font-mono px-1.5 py-0.5 rounded glass-hairline">⌘K</kbd>
+      </button>
 
-        {/* Center Section - Search */}
-        <div className="hidden md:flex flex-1 max-w-md mx-8">
-          <div className="relative w-full">
-            <Search
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none"
-              aria-hidden="true"
-            />
-            <input
-              type="search"
-              placeholder="Search documents..."
-              aria-label="Search documents"
-              className={cn(
-                'w-full pl-10 pr-4 py-2 rounded-xl border border-default',
-                'bg-canvas text-text-primary placeholder:text-text-muted',
-                'focus:outline-none focus:ring-2 focus:ring-accent-brand focus:border-transparent',
-                'transition-all duration-base'
-              )}
-            />
-          </div>
-        </div>
+      <div className="flex items-center gap-1 ml-auto md:ml-0">
+        <button onClick={openPalette} aria-label="Search" className="btn-ghost p-2 md:hidden">
+          <Search className="w-5 h-5" aria-hidden />
+        </button>
 
-        {/* Right Section */}
-        <div className="flex items-center gap-1">
-          {/* Search (Mobile) */}
-          <Button variant="ghost" size="icon" aria-label="Search" className="md:hidden">
-            <Search className="h-5 w-5" aria-hidden="true" />
-          </Button>
+        <span className="hidden sm:inline-flex badge-warning font-mono mr-1">staging</span>
 
-          {/* V3 Phase 8 — Theme toggle (3-state: light/dark/system) */}
-          <ThemeToggle />
+        <ThemeToggle />
 
-          {/* Notifications */}
-          <div className="relative">
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={
-                notifications > 0
-                  ? `${notifications} unread notifications`
-                  : 'Notifications'
-              }
-            >
-              <Bell className="h-5 w-5" aria-hidden="true" />
-              {notifications > 0 && (
+        {user ? (
+          <Dropdown
+            align="right"
+            trigger={
+              <button className="btn-ghost flex items-center gap-2 pl-1 pr-2" aria-label={`Account: ${user.name}`}>
                 <span
-                  aria-hidden="true"
-                  className="absolute top-1 right-1 w-4 h-4 bg-accent-danger text-white text-small rounded-full flex items-center justify-center"
+                  className="grid place-items-center w-8 h-8 rounded-full text-small font-semibold text-accent-brand"
+                  style={{ background: 'rgb(var(--accent-brand-rgb) / 0.14)' }}
                 >
-                  {notifications > 9 ? '9+' : notifications}
+                  {initials}
                 </span>
-              )}
-            </Button>
-          </div>
-
-          {/* User Menu */}
-          {user ? (
-            <Dropdown
-              align="right"
-              trigger={
-                <Button
-                  variant="ghost"
-                  className="flex items-center gap-2 px-2"
-                  aria-label={`Account menu for ${user.name}`}
-                >
-                  <div className="w-8 h-8 rounded-full bg-accent-brand-soft flex items-center justify-center">
-                    {user.avatar ? (
-                      <Image
-                        src={user.avatar}
-                        alt=""
-                        width={32}
-                        height={32}
-                        className="w-8 h-8 rounded-full"
-                      />
-                    ) : (
-                      <User className="w-4 h-4 text-accent-brand" aria-hidden="true" />
-                    )}
-                  </div>
-                  <span className="hidden sm:block text-body text-text-secondary">
-                    {user.name}
-                  </span>
-                  <ChevronDown className="hidden sm:block w-4 h-4 text-text-muted" aria-hidden="true" />
-                </Button>
-              }
-              items={[
-                {
-                  label: user.email,
-                  disabled: true,
-                },
-                { divider: true, label: '' },
-                {
-                  label: 'Settings',
-                  icon: <Settings className="w-4 h-4" />,
-                  onClick: () => {},
-                },
-                {
-                  label: 'Sign out',
-                  icon: <LogOut className="w-4 h-4" />,
-                  onClick: () => {},
-                  danger: true,
-                },
-              ]}
-            />
-          ) : (
-            <Link href="/login">
-              <Button variant="primary" size="sm">
-                Sign In
-              </Button>
-            </Link>
-          )}
-        </div>
+                <span className="hidden sm:block text-body text-text-secondary">{user.name}</span>
+                <ChevronDown className="hidden sm:block w-4 h-4 text-text-muted" aria-hidden />
+              </button>
+            }
+            items={[
+              { label: user.email, disabled: true },
+              { divider: true, label: '' },
+              { label: 'Settings', icon: <Settings className="w-4 h-4" />, onClick: () => router.push('/settings') },
+              { label: 'Help', icon: <HelpCircle className="w-4 h-4" />, onClick: () => router.push('/help') },
+              { label: 'Sign out', icon: <LogOut className="w-4 h-4" />, onClick: () => onSignOut?.(), danger: true },
+            ]}
+          />
+        ) : (
+          <Link href="/login" className="btn-primary text-small px-3 py-1.5">
+            Sign in
+          </Link>
+        )}
       </div>
     </header>
   );
-};
-
-export default Header;
+}

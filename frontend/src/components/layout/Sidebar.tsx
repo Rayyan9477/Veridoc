@@ -4,260 +4,128 @@ import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  LayoutDashboard,
-  FileText,
-  Upload,
-  ListTodo,
-  Settings,
-  Activity,
-  Database,
-  Shield,
-  HelpCircle,
-  ChevronLeft,
-  X,
-} from 'lucide-react';
+import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Button, Badge } from '@/components/ui';
 import { BRANDING } from '@/lib/branding';
-
-interface NavItem {
-  label: string;
-  href: string;
-  icon: React.ReactNode;
-  badge?: string | number;
-  children?: NavItem[];
-}
-
-const navItems: NavItem[] = [
-  {
-    label: 'Dashboard',
-    href: '/dashboard',
-    icon: <LayoutDashboard className="w-5 h-5" />,
-  },
-  {
-    label: 'Documents',
-    href: '/documents',
-    icon: <FileText className="w-5 h-5" />,
-  },
-  {
-    label: 'Upload',
-    href: '/documents/upload',
-    icon: <Upload className="w-5 h-5" />,
-  },
-  {
-    label: 'Task Queue',
-    href: '/tasks',
-    icon: <ListTodo className="w-5 h-5" />,
-  },
-  {
-    label: 'Health',
-    href: '/health',
-    icon: <Activity className="w-5 h-5" />,
-  },
-  {
-    label: 'Schemas',
-    href: '/schemas',
-    icon: <Database className="w-5 h-5" />,
-  },
-];
-
-const bottomNavItems: NavItem[] = [
-  {
-    label: 'Settings',
-    href: '/settings',
-    icon: <Settings className="w-5 h-5" />,
-  },
-  {
-    label: 'Security',
-    href: '/security',
-    icon: <Shield className="w-5 h-5" />,
-  },
-  {
-    label: 'Help',
-    href: '/help',
-    icon: <HelpCircle className="w-5 h-5" />,
-  },
-];
+import { activeNavHref, NAV_GROUPS, type NavItem } from './nav-config';
 
 interface SidebarProps {
   isOpen: boolean;
   onClose: () => void;
-  isCollapsed?: boolean;
-  onToggleCollapse?: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({
-  isOpen,
-  onClose,
-  isCollapsed = false,
-  onToggleCollapse,
-}) => {
-  const pathname = usePathname();
-
-  const NavLink: React.FC<{ item: NavItem }> = ({ item }) => {
-    const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
-
-    return (
-      <Link
-        href={item.href}
-        onClick={() => onClose()}
-        // V3 Phase 8 — aria-current marks the active route for AT.
-        aria-current={isActive ? 'page' : undefined}
-        title={isCollapsed ? item.label : undefined}
-        className={cn(
-          'flex items-center gap-3 px-3 py-2.5 rounded-xl',
-          'transition-all duration-base',
-          'group relative',
-          isActive
-            ? 'bg-accent-brand-soft text-accent-brand'
-            : 'text-text-secondary hover:bg-surface hover:text-text-primary'
-        )}
-      >
-        <span
-          className={cn(
-            'flex-shrink-0 transition-colors',
-            isActive ? 'text-accent-brand' : 'text-text-muted group-hover:text-text-secondary'
-          )}
-          aria-hidden="true"
-        >
-          {item.icon}
+function Wordmark() {
+  return (
+    <Link
+      href="/dashboard"
+      aria-label={`${BRANDING.productName} home`}
+      className="flex items-center gap-3 px-1"
+    >
+      <span className="relative grid place-items-center w-9 h-9 rounded-xl glass-panel">
+        <span className="font-display text-lg font-semibold text-accent-brand">V</span>
+      </span>
+      <span className="flex flex-col leading-tight">
+        <span className="font-display text-h3 font-semibold text-text-primary">
+          {BRANDING.productName}
         </span>
-        {!isCollapsed && (
-          <>
-            <span className="flex-1 font-medium text-body">{item.label}</span>
-            {item.badge && (
-              <Badge size="sm" variant={isActive ? 'primary' : 'default'}>
-                {item.badge}
-              </Badge>
-            )}
-          </>
-        )}
-        {isActive && (
-          <motion.div
-            layoutId="activeNav"
-            className="absolute left-0 w-1 h-8 bg-accent-brand rounded-r-full"
-            transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-            aria-hidden="true"
-          />
-        )}
-      </Link>
-    );
-  };
+        <span className="text-[0.65rem] text-text-muted font-mono">{BRANDING.versionLabel}</span>
+      </span>
+    </Link>
+  );
+}
 
-  const sidebarContent = (
-    <div className="flex flex-col h-full">
-      {/* Logo */}
-      <div className="flex items-center justify-between h-16 px-4 border-b border-default">
-        <Link
-          href="/"
-          aria-label={`${BRANDING.productName} home`}
-          className="flex items-center gap-3"
-        >
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center shadow-elev-1">
-            <FileText className="w-6 h-6 text-white" aria-hidden="true" />
-          </div>
-          {!isCollapsed && (
-            <div className="flex flex-col">
-              <span className="text-h3 font-bold text-text-primary">{BRANDING.productName}</span>
-              <span className="text-small text-text-muted">{BRANDING.versionLabel}</span>
-            </div>
-          )}
-        </Link>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onClose}
-          aria-label="Close navigation"
-          className="lg:hidden"
-        >
-          <X className="w-5 h-5" aria-hidden="true" />
-        </Button>
-      </div>
-
-      {/* Navigation */}
-      <nav
-        aria-label="Primary navigation"
-        className="flex-1 overflow-y-auto p-4 space-y-1"
-      >
-        {navItems.map((item) => (
-          <NavLink key={item.href} item={item} />
-        ))}
-      </nav>
-
-      {/* Bottom Navigation */}
-      <nav
-        aria-label="Secondary navigation"
-        className="p-4 border-t border-default space-y-1"
-      >
-        {bottomNavItems.map((item) => (
-          <NavLink key={item.href} item={item} />
-        ))}
-      </nav>
-
-      {/* Collapse Toggle (Desktop) */}
-      {onToggleCollapse && (
-        <div className="hidden lg:block p-4 border-t border-surface-100">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onToggleCollapse}
-            className="w-full justify-center"
-          >
-            <ChevronLeft
-              className={cn(
-                'w-5 h-5 transition-transform',
-                isCollapsed && 'rotate-180'
-              )}
-            />
-          </Button>
-        </div>
+function NavLink({ item, onNavigate }: { item: NavItem; onNavigate: () => void }) {
+  const pathname = usePathname();
+  const isActive = activeNavHref(pathname) === item.href;
+  const Icon = item.icon;
+  return (
+    <Link
+      href={item.href}
+      onClick={onNavigate}
+      aria-current={isActive ? 'page' : undefined}
+      className={cn('relative', isActive ? 'nav-item-active' : 'nav-item')}
+    >
+      <Icon
+        className={cn('w-[1.15rem] h-[1.15rem] shrink-0', isActive && 'text-accent-brand')}
+        aria-hidden
+      />
+      <span className="flex-1 truncate">{item.label}</span>
+      {isActive && (
+        <motion.span
+          layoutId="sidebarActive"
+          className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-6 rounded-r-full bg-accent-brand"
+          transition={{ type: 'spring', stiffness: 500, damping: 32 }}
+          aria-hidden
+        />
       )}
+    </Link>
+  );
+}
+
+function SidebarBody({ onNavigate }: { onNavigate: () => void }) {
+  return (
+    <div className="flex flex-col h-full">
+      <div className="h-16 flex items-center px-4 border-b border-border-default">
+        <Wordmark />
+      </div>
+      <nav aria-label="Primary" className="flex-1 overflow-y-auto px-3 pb-8 no-scrollbar">
+        {NAV_GROUPS.map((group) => (
+          <div key={group.label}>
+            <div className="nav-group-label">{group.label}</div>
+            <div className="space-y-0.5">
+              {group.items.map((item) => (
+                <NavLink key={item.href} item={item} onNavigate={onNavigate} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </nav>
     </div>
   );
+}
 
+export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   return (
     <>
-      {/* Mobile Overlay */}
+      {/* Mobile drawer */}
       <AnimatePresence>
         {isOpen && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-black/50 z-40 lg:hidden"
-          />
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={onClose}
+              className="fixed inset-0 z-40 lg:hidden"
+              style={{ background: 'rgb(var(--bg-overlay-rgb) / 0.55)' }}
+            />
+            <motion.aside
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+              className="fixed inset-y-0 left-0 z-50 w-72 glass-panel !rounded-none lg:hidden"
+            >
+              <button
+                onClick={onClose}
+                aria-label="Close navigation"
+                className="btn-ghost absolute top-3.5 right-3 p-1.5"
+              >
+                <X className="w-5 h-5" aria-hidden />
+              </button>
+              <SidebarBody onNavigate={onClose} />
+            </motion.aside>
+          </>
         )}
       </AnimatePresence>
 
-      {/* Mobile Sidebar */}
-      <AnimatePresence>
-        {isOpen && (
-          <motion.aside
-            initial={{ x: '-100%' }}
-            animate={{ x: 0 }}
-            exit={{ x: '-100%' }}
-            transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-            className="fixed inset-y-0 left-0 w-72 bg-surface dark:bg-surface-raised border-r border-surface-200 z-50 lg:hidden"
-          >
-            {sidebarContent}
-          </motion.aside>
-        )}
-      </AnimatePresence>
-
-      {/* Desktop Sidebar */}
+      {/* Desktop rail — frosted over the ambient canvas */}
       <aside
-        className={cn(
-          'hidden lg:flex flex-col bg-surface dark:bg-surface-raised border-r border-surface-200',
-          'transition-all duration-300',
-          isCollapsed ? 'w-20' : 'w-72'
-        )}
+        className="hidden lg:flex flex-col w-72 shrink-0 border-r border-border-default backdrop-blur-xl"
+        style={{ background: 'rgb(var(--bg-surface-rgb) / 0.35)' }}
       >
-        {sidebarContent}
+        <SidebarBody onNavigate={() => {}} />
       </aside>
     </>
   );
-};
-
-export default Sidebar;
+}
