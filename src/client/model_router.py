@@ -34,6 +34,29 @@ logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Agent → role mapping (module-level so role-based rotation works even when
+# no ModelRouter is attached — D2)
+# ---------------------------------------------------------------------------
+
+# Conservative: every legacy agent is PRIMARY; the dual-VLM Pass 2 auditor
+# and the Critic bind to their natural roles. Changing this changes which
+# model each agent rotates onto — coordinate with the role_models config.
+_AGENT_ROLE_MAP: dict[str, VLMRole] = {
+    "extractor_pass2": VLMRole.SECONDARY,
+    "critic": VLMRole.CRITIC,
+}
+
+
+def role_for_agent_name(agent_name: str) -> VLMRole:
+    """Map an agent name to its default ``VLMRole`` (PRIMARY when unmapped).
+
+    Shared by :meth:`ModelRouter.role_for_agent` and ``BaseAgent`` so the
+    role→model rotation is available without a router instance.
+    """
+    return _AGENT_ROLE_MAP.get(agent_name, VLMRole.PRIMARY)
+
+
+# ---------------------------------------------------------------------------
 # Task taxonomy
 # ---------------------------------------------------------------------------
 
@@ -392,11 +415,7 @@ class ModelRouter:
         roles. Operators can override per-agent role via ``ModelConfig``
         in the future; today it's a static map.
         """
-        role_map: dict[str, VLMRole] = {
-            "extractor_pass2": VLMRole.SECONDARY,
-            "critic": VLMRole.CRITIC,
-        }
-        return role_map.get(agent_name, VLMRole.PRIMARY)
+        return role_for_agent_name(agent_name)
 
     def route_for_role(
         self,

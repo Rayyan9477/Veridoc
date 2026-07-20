@@ -62,10 +62,16 @@ def _resolve_backend_client() -> LMStudioClient:
                 model=model,
                 api_key=(qc.api_key.get_secret_value() if qc.api_key else None),
             )
-        except Exception:
-            # Fall back to the default client; the workflow surfaces any real
-            # backend misconfiguration downstream.
-            pass
+        except Exception as exc:
+            # FAIL LOUD: the operator explicitly selected qwen_cloud. Silently
+            # degrading to a localhost LM Studio client hides a misconfigured
+            # key/URL behind opaque connection errors later — surface it now.
+            get_logger("pipeline.runner").error(
+                "qwen_cloud_client_build_failed",
+                error=str(exc),
+                hint="Check VLM_QWEN_CLOUD_PRIMARY_URL / _API_KEY.",
+            )
+            raise
     return LMStudioClient()
 
 
@@ -134,11 +140,15 @@ class PipelineRunner:
     def _ensure_workflow_initialized(self) -> None:
         """Ensure the workflow is built and compiled."""
         if self._orchestrator is None or self._compiled_workflow is None:
+            _ex = get_settings().extraction
             self._orchestrator, self._compiled_workflow = create_extraction_workflow(
                 preprocess_fn=self._preprocess_node,
                 client=self._client,
                 enable_checkpointing=self._enable_checkpointing,
                 max_retries=self._max_retries,
+                enable_vlm_first=getattr(_ex, "enable_vlm_first", True),
+                enable_splitter=getattr(_ex, "enable_splitter", True),
+                enable_table_detection=getattr(_ex, "enable_table_detection", True),
             )
 
     def extract_from_pdf(

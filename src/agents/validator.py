@@ -415,9 +415,13 @@ class ValidatorAgent(BaseAgent):
             if schema:
                 field_def = self._get_field_definition(schema, field_name)
                 if field_def:
-                    is_valid, error = validate_field(value, field_def)
-                    if not is_valid and error:
-                        field_errors.append(error)
+                    info = validate_field(
+                        value,
+                        field_def.field_type,
+                        required=field_def.required,
+                    )
+                    if info.result == CodeValidationResult.INVALID and info.message:
+                        field_errors.append(info.message)
 
             result.field_validations[field_name] = (
                 len(field_errors) == 0

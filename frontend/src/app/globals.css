@@ -1,67 +1,100 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /*
- * V3 Phase 8 — Design tokens as CSS custom properties.
+ * Veridoc "Glass" design system — a frosted control-room aesthetic.
  *
- * Every semantic Tailwind alias (bg-canvas, text-primary, accent-brand
- * etc.) reads from these variables, so flipping `.dark` on `<html>`
- * swaps the entire theme without touching component classes.
+ * Dark-first glassmorphism: a deep cool-ink canvas, frosted translucent
+ * panels (backdrop-blur + a hairline luminous top-edge), a fine grain
+ * overlay so the glass never reads as flat plastic, and a color language
+ * driven by the product's core signal — CALIBRATED CONFIDENCE
+ * (emerald = high, amber = medium, rose = low) against a cyan "verify"
+ * accent. Fonts arrive from next/font (Sora display, Manrope UI, JetBrains
+ * Mono) as CSS variables on <html>.
  *
- * Documented in frontend/src/lib/design.md.
+ * Every semantic Tailwind alias (bg-canvas, text-primary, accent-brand …)
+ * reads a CSS custom property, so flipping `.dark` on <html> swaps the whole
+ * theme without touching component classes.
  */
+
 :root {
-  /* Surfaces */
-  --bg-canvas-rgb: 250 250 251;        /* near-white app background */
-  --bg-surface-rgb: 255 255 255;        /* card/panel background */
-  --bg-surface-raised-rgb: 255 255 255; /* modal / elevated panel */
-  --bg-overlay-rgb: 0 0 0;              /* modal scrim (alpha applied) */
+  color-scheme: light;
+
+  /* Surfaces — frosted daylight */
+  --bg-canvas-rgb: 234 238 245;
+  --bg-surface-rgb: 255 255 255;
+  --bg-surface-raised-rgb: 255 255 255;
+  --bg-overlay-rgb: 15 20 30;
 
   /* Text */
-  --text-primary-rgb: 24 24 27;     /* surface-900 */
-  --text-secondary-rgb: 82 82 91;   /* surface-600 */
-  --text-muted-rgb: 161 161 170;    /* surface-400 */
+  --text-primary-rgb: 16 22 34;
+  --text-secondary-rgb: 71 82 102;
+  --text-muted-rgb: 122 132 150;
 
   /* Borders */
-  --border-default-rgb: 228 228 231; /* surface-200 */
-  --border-strong-rgb: 212 212 216;  /* surface-300 */
+  --border-default-rgb: 222 227 236;
+  --border-strong-rgb: 201 208 221;
 
-  /* Accents */
-  --accent-brand-rgb: 59 130 246;       /* primary-500 */
-  --accent-brand-soft-rgb: 219 234 254; /* primary-100 */
-  --accent-success-rgb: 34 197 94;      /* accent-500 */
-  --accent-warning-rgb: 245 158 11;     /* warning */
-  --accent-danger-rgb: 239 68 68;       /* error */
-  --accent-info-rgb: 59 130 246;
+  /* Accents — cyan "verify" + confidence triad */
+  --accent-brand-rgb: 8 145 178;      /* cyan-600 */
+  --accent-brand-soft-rgb: 207 232 240;
+  --accent-success-rgb: 5 150 105;    /* emerald-600 (high confidence) */
+  --accent-warning-rgb: 202 138 4;    /* amber-600 (medium confidence) */
+  --accent-danger-rgb: 225 29 72;     /* rose-600 (low confidence) */
+  --accent-info-rgb: 8 145 178;
+
+  /* Glass */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(16, 22, 34, 0.08);
+  --glass-highlight: rgba(255, 255, 255, 0.9);
+  --glass-shadow: 0 10px 34px -12px rgba(16, 22, 34, 0.22);
+  --glass-blur: 16px;
+  --grain-opacity: 0.022;
+
+  /* Ambient background wash */
+  --ambient-1: rgba(8, 145, 178, 0.10);
+  --ambient-2: rgba(16, 185, 129, 0.08);
+  --ambient-3: rgba(99, 102, 241, 0.06);
 }
 
 .dark {
-  /* Surfaces — pulled from a desaturated near-black palette so
-     long-form reading isn't fatiguing. */
-  --bg-canvas-rgb: 9 9 11;            /* surface-950 equivalent */
-  --bg-surface-rgb: 24 24 27;         /* surface-900 */
-  --bg-surface-raised-rgb: 39 39 42;  /* surface-800 */
+  color-scheme: dark;
+
+  /* Surfaces — deep cool ink */
+  --bg-canvas-rgb: 7 9 13;
+  --bg-surface-rgb: 16 19 26;
+  --bg-surface-raised-rgb: 23 27 36;
   --bg-overlay-rgb: 0 0 0;
 
   /* Text */
-  --text-primary-rgb: 244 244 245;   /* surface-100 */
-  --text-secondary-rgb: 161 161 170; /* surface-400 */
-  --text-muted-rgb: 113 113 122;     /* surface-500 */
+  --text-primary-rgb: 234 238 245;
+  --text-secondary-rgb: 156 165 181;
+  --text-muted-rgb: 104 113 130;
 
-  /* Borders */
-  --border-default-rgb: 63 63 70;  /* surface-700 */
-  --border-strong-rgb: 82 82 91;   /* surface-600 */
+  /* Borders (fallback; glass uses white-alpha) */
+  --border-default-rgb: 38 44 56;
+  --border-strong-rgb: 58 66 82;
 
-  /* Accents — slightly lighter in dark for AAA contrast on canvas. */
-  --accent-brand-rgb: 96 165 250;       /* primary-400 */
-  --accent-brand-soft-rgb: 30 58 138;   /* primary-900 */
-  --accent-success-rgb: 74 222 128;     /* accent-400 */
-  --accent-warning-rgb: 252 211 77;
-  --accent-danger-rgb: 248 113 113;
-  --accent-info-rgb: 96 165 250;
+  /* Accents — brighter in dark for AAA contrast on the ink canvas */
+  --accent-brand-rgb: 34 211 238;     /* cyan-400 */
+  --accent-brand-soft-rgb: 8 51 68;
+  --accent-success-rgb: 52 211 153;   /* emerald-400 */
+  --accent-warning-rgb: 251 191 36;   /* amber-400 */
+  --accent-danger-rgb: 251 113 133;   /* rose-400 */
+  --accent-info-rgb: 34 211 238;
+
+  /* Glass */
+  --glass-bg: rgba(255, 255, 255, 0.045);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-highlight: rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 16px 48px -16px rgba(0, 0, 0, 0.6);
+  --glass-blur: 18px;
+  --grain-opacity: 0.05;
+
+  --ambient-1: rgba(34, 211, 238, 0.10);
+  --ambient-2: rgba(16, 185, 129, 0.07);
+  --ambient-3: rgba(99, 102, 241, 0.06);
 }
 
 @layer base {
@@ -75,266 +108,220 @@
 
   body {
     @apply bg-canvas text-text-primary font-sans;
+    position: relative;
+    min-height: 100vh;
   }
 
-  /* Scrollbar — semantic tokens so dark mode flips with the body. */
+  /* Ambient atmosphere so the frosted glass has depth to refract. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    pointer-events: none;
+    background:
+      radial-gradient(55rem 40rem at 10% -12%, var(--ambient-1), transparent 60%),
+      radial-gradient(48rem 38rem at 102% 2%, var(--ambient-2), transparent 55%),
+      radial-gradient(70rem 52rem at 50% 118%, var(--ambient-3), transparent 60%);
+  }
+
+  /* Fine grain — keeps the glass from looking like flat plastic. */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    opacity: var(--grain-opacity);
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
   ::-webkit-scrollbar {
     @apply w-2 h-2;
   }
-
   ::-webkit-scrollbar-track {
-    background-color: rgb(var(--bg-surface-rgb));
-    border-radius: 9999px;
+    background: transparent;
   }
-
   ::-webkit-scrollbar-thumb {
     background-color: rgb(var(--border-strong-rgb));
     border-radius: 9999px;
     @apply transition-colors;
   }
-
   ::-webkit-scrollbar-thumb:hover {
     background-color: rgb(var(--text-muted-rgb));
   }
 
-  /* V3 Phase 8 — Single canonical focus ring. Every interactive
-     component should rely on this rather than a one-off ring. */
   *:focus-visible {
     outline: 2px solid rgb(var(--accent-brand-rgb));
     outline-offset: 2px;
   }
 
   ::selection {
-    background-color: rgb(var(--accent-brand-soft-rgb));
+    background-color: rgb(var(--accent-brand-rgb) / 0.28);
     color: rgb(var(--text-primary-rgb));
   }
 }
 
+@layer components {
+  /* ── Glass surfaces ───────────────────────────────────────────── */
+  .glass-panel {
+    position: relative;
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 0 var(--glass-highlight);
+    @apply rounded-2xl;
+  }
+  .glass-hairline {
+    border: 1px solid var(--glass-border);
+  }
+
+  /* Card = glass panel (rewritten from the old opaque white card). */
+  .card {
+    @apply glass-panel overflow-hidden;
+  }
+  .card-hover {
+    @apply card transition-all duration-base ease-out-expo;
+  }
+  .card-hover:hover {
+    border-color: rgb(var(--accent-brand-rgb) / 0.35);
+    transform: translateY(-2px);
+  }
+
+  /* ── Buttons ──────────────────────────────────────────────────── */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-medium
+           text-body transition-all duration-fast ease-out-expo
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn;
+    background: rgb(var(--accent-brand-rgb));
+    color: rgb(var(--bg-canvas-rgb));
+    box-shadow: 0 6px 20px -6px rgb(var(--accent-brand-rgb) / 0.6);
+  }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-primary:active { filter: brightness(0.95); }
+  .btn-secondary {
+    @apply btn glass-hairline backdrop-blur-md;
+    background: var(--glass-bg);
+    color: rgb(var(--text-primary-rgb));
+  }
+  .btn-secondary:hover { border-color: rgb(var(--border-strong-rgb)); }
+  .btn-ghost {
+    @apply btn text-text-secondary;
+  }
+  .btn-ghost:hover {
+    color: rgb(var(--text-primary-rgb));
+    background: rgb(var(--text-primary-rgb) / 0.06);
+  }
+  .btn-danger {
+    @apply btn text-white;
+    background: rgb(var(--accent-danger-rgb));
+  }
+  .btn-success {
+    @apply btn text-white;
+    background: rgb(var(--accent-success-rgb));
+  }
+
+  /* ── Inputs ───────────────────────────────────────────────────── */
+  .input {
+    @apply w-full px-4 py-2.5 rounded-xl text-body glass-hairline
+           placeholder:text-text-muted transition-all duration-fast;
+    background: rgb(var(--bg-surface-rgb) / 0.55);
+    color: rgb(var(--text-primary-rgb));
+  }
+  .input:focus {
+    border-color: rgb(var(--accent-brand-rgb) / 0.6);
+    box-shadow: 0 0 0 3px rgb(var(--accent-brand-rgb) / 0.15);
+    outline: none;
+  }
+  .input-error {
+    @apply input;
+    border-color: rgb(var(--accent-danger-rgb));
+  }
+
+  /* ── Badges ───────────────────────────────────────────────────── */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-small font-medium;
+  }
+  .badge-primary { background: rgb(var(--accent-brand-rgb) / 0.14); color: rgb(var(--accent-brand-rgb)); }
+  .badge-success { background: rgb(var(--accent-success-rgb) / 0.14); color: rgb(var(--accent-success-rgb)); }
+  .badge-warning { background: rgb(var(--accent-warning-rgb) / 0.16); color: rgb(var(--accent-warning-rgb)); }
+  .badge-error   { background: rgb(var(--accent-danger-rgb) / 0.14); color: rgb(var(--accent-danger-rgb)); }
+  .badge-info    { background: rgb(var(--accent-info-rgb) / 0.14); color: rgb(var(--accent-info-rgb)); }
+
+  /* ── Confidence language (the product's core signal) ──────────── */
+  .conf-high { color: rgb(var(--accent-success-rgb)); }
+  .conf-med  { color: rgb(var(--accent-warning-rgb)); }
+  .conf-low  { color: rgb(var(--accent-danger-rgb)); }
+  .conf-chip { @apply badge font-mono tabular-nums; }
+  .conf-chip-high { @apply conf-chip; background: rgb(var(--accent-success-rgb) / 0.14); color: rgb(var(--accent-success-rgb)); }
+  .conf-chip-med  { @apply conf-chip; background: rgb(var(--accent-warning-rgb) / 0.16); color: rgb(var(--accent-warning-rgb)); }
+  .conf-chip-low  { @apply conf-chip; background: rgb(var(--accent-danger-rgb) / 0.14); color: rgb(var(--accent-danger-rgb)); }
+
+  /* ── Status dots (glow so live states read at a glance) ───────── */
+  .status-dot { @apply w-2 h-2 rounded-full; }
+  .status-dot-success { @apply status-dot; background: rgb(var(--accent-success-rgb)); box-shadow: 0 0 8px rgb(var(--accent-success-rgb) / 0.7); }
+  .status-dot-warning { @apply status-dot; background: rgb(var(--accent-warning-rgb)); box-shadow: 0 0 8px rgb(var(--accent-warning-rgb) / 0.7); }
+  .status-dot-error   { @apply status-dot; background: rgb(var(--accent-danger-rgb)); box-shadow: 0 0 8px rgb(var(--accent-danger-rgb) / 0.7); }
+  .status-dot-info    { @apply status-dot; background: rgb(var(--accent-info-rgb)); box-shadow: 0 0 8px rgb(var(--accent-info-rgb) / 0.7); }
+
+  /* ── Misc ─────────────────────────────────────────────────────── */
+  .glass { @apply glass-panel; }
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(120deg, rgb(var(--accent-brand-rgb)), rgb(var(--accent-success-rgb)));
+  }
+  .skeleton { @apply animate-pulse rounded-lg; background: rgb(var(--text-primary-rgb) / 0.08); }
+  .divider { @apply h-px my-4; background: var(--glass-border); }
+  .container-app { @apply max-w-[100rem] mx-auto px-4 sm:px-6 lg:px-8; }
+
+  .stat-card { @apply card p-5 flex flex-col gap-1.5; }
+  .stat-value { @apply text-3xl font-display font-semibold tracking-tight; color: rgb(var(--text-primary-rgb)); }
+  .stat-label { @apply text-small uppercase tracking-wide text-text-muted; }
+  .stat-change { @apply text-small font-medium inline-flex items-center gap-1; }
+  .stat-change-positive { @apply stat-change conf-high; }
+  .stat-change-negative { @apply stat-change conf-low; }
+
+  /* ── Sidebar navigation primitives ────────────────────────────── */
+  .nav-item {
+    @apply flex items-center gap-3 px-3 py-2 rounded-xl text-body text-text-secondary
+           transition-all duration-fast ease-out-expo;
+  }
+  .nav-item:hover {
+    color: rgb(var(--text-primary-rgb));
+    background: rgb(var(--text-primary-rgb) / 0.05);
+  }
+  .nav-item-active {
+    @apply nav-item;
+    color: rgb(var(--text-primary-rgb));
+    background: rgb(var(--accent-brand-rgb) / 0.12);
+    box-shadow: inset 0 0 0 1px rgb(var(--accent-brand-rgb) / 0.25);
+  }
+  .nav-group-label {
+    @apply px-3 pt-4 pb-1.5 text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-text-muted;
+  }
+}
+
 @layer utilities {
-  /* V3 Phase 8 — explicit `.focus-ring` utility for components that
-     need to opt into the canonical ring without relying on the
-     :focus-visible global (e.g. focus-trap testers, custom buttons). */
   .focus-ring {
     @apply outline-none ring-2 ring-accent-brand ring-offset-2 ring-offset-canvas;
   }
+  .text-balance { text-wrap: balance; }
+  .animation-delay-100 { animation-delay: 100ms; }
+  .animation-delay-200 { animation-delay: 200ms; }
+  .animation-delay-300 { animation-delay: 300ms; }
+  .animation-delay-400 { animation-delay: 400ms; }
+  .animation-delay-500 { animation-delay: 500ms; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 }
 
-@layer components {
-  /* Card styles */
-  .card {
-    @apply bg-white rounded-xl shadow-soft border border-surface-100 overflow-hidden;
-  }
-
-  .card-hover {
-    @apply card transition-all duration-300 hover:shadow-lg hover:border-primary-200 hover:-translate-y-0.5;
-  }
-
-  /* Button base styles */
-  .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium
-           transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-
-  .btn-primary {
-    @apply btn bg-primary-600 text-white hover:bg-primary-700 active:bg-primary-800
-           shadow-sm hover:shadow-md;
-  }
-
-  .btn-secondary {
-    @apply btn bg-surface-100 text-surface-700 hover:bg-surface-200 active:bg-surface-300
-           border border-surface-200;
-  }
-
-  .btn-ghost {
-    @apply btn text-surface-600 hover:bg-surface-100 hover:text-surface-900;
-  }
-
-  .btn-danger {
-    @apply btn bg-error text-white hover:bg-error-dark active:opacity-90;
-  }
-
-  .btn-success {
-    @apply btn bg-success text-white hover:bg-success-dark active:opacity-90;
-  }
-
-  /* Input styles */
-  .input {
-    @apply w-full px-4 py-2.5 rounded-lg border border-surface-200 bg-white
-           placeholder:text-surface-400 transition-all duration-200
-           hover:border-surface-300 focus:border-primary-500 focus:ring-2
-           focus:ring-primary-500/20;
-  }
-
-  .input-error {
-    @apply input border-error focus:border-error focus:ring-error/20;
-  }
-
-  /* Badge styles */
-  .badge {
-    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
-  }
-
-  .badge-primary {
-    @apply badge bg-primary-100 text-primary-700;
-  }
-
-  .badge-success {
-    @apply badge bg-success-light text-success-dark;
-  }
-
-  .badge-warning {
-    @apply badge bg-warning-light text-warning-dark;
-  }
-
-  .badge-error {
-    @apply badge bg-error-light text-error-dark;
-  }
-
-  .badge-info {
-    @apply badge bg-info-light text-info-dark;
-  }
-
-  /* Status indicator */
-  .status-dot {
-    @apply w-2 h-2 rounded-full animate-pulse;
-  }
-
-  .status-dot-success {
-    @apply status-dot bg-success;
-  }
-
-  .status-dot-warning {
-    @apply status-dot bg-warning;
-  }
-
-  .status-dot-error {
-    @apply status-dot bg-error;
-  }
-
-  .status-dot-info {
-    @apply status-dot bg-info;
-  }
-
-  /* Glass morphism effect */
-  .glass {
-    @apply bg-white/70 backdrop-blur-lg border border-white/20;
-  }
-
-  /* Gradient text */
-  .gradient-text {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary-600 to-accent-500;
-  }
-
-  /* Loading skeleton */
-  .skeleton {
-    @apply bg-surface-200 animate-pulse rounded;
-  }
-
-  /* Divider */
-  .divider {
-    @apply h-px bg-surface-200 my-4;
-  }
-
-  /* Container */
-  .container-app {
-    @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
-  }
-
-  /* Stat card */
-  .stat-card {
-    @apply card p-6 flex flex-col gap-2;
-  }
-
-  .stat-value {
-    @apply text-3xl font-bold text-surface-900;
-  }
-
-  .stat-label {
-    @apply text-sm text-surface-500;
-  }
-
-  .stat-change {
-    @apply text-xs font-medium flex items-center gap-1;
-  }
-
-  .stat-change-positive {
-    @apply stat-change text-success;
-  }
-
-  .stat-change-negative {
-    @apply stat-change text-error;
-  }
-}
-
-@layer utilities {
-  /* Text utilities */
-  .text-balance {
-    text-wrap: balance;
-  }
-
-  /* Animation delays */
-  .animation-delay-100 {
-    animation-delay: 100ms;
-  }
-
-  .animation-delay-200 {
-    animation-delay: 200ms;
-  }
-
-  .animation-delay-300 {
-    animation-delay: 300ms;
-  }
-
-  .animation-delay-400 {
-    animation-delay: 400ms;
-  }
-
-  .animation-delay-500 {
-    animation-delay: 500ms;
-  }
-
-  /* Hide scrollbar */
-  .no-scrollbar::-webkit-scrollbar {
-    display: none;
-  }
-
-  .no-scrollbar {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
-  }
-
-  /* Gradient borders */
-  .gradient-border {
-    @apply relative;
-  }
-
-  .gradient-border::before {
-    content: '';
-    @apply absolute inset-0 rounded-xl p-[1px];
-    background: linear-gradient(135deg, theme('colors.primary.400'), theme('colors.accent.400'));
-    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-  }
-}
-
-/* Dark mode support (future enhancement) */
-@media (prefers-color-scheme: dark) {
-  /* Dark mode styles can be added here */
-}
-
-/* Print styles */
 @media print {
-  .no-print {
-    display: none !important;
-  }
-
-  body {
-    @apply bg-white text-black;
-  }
-
-  .card {
-    @apply shadow-none border;
-  }
+  .no-print { display: none !important; }
+  body::before,
+  body::after { display: none; }
+  body { background: #fff; color: #000; }
 }

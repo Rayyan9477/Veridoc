@@ -2064,6 +2064,13 @@ def validate_field(
     Returns:
         ValidationInfo with validation result.
     """
+    # Defensive: some call-sites pass a whole FieldDefinition instead of its
+    # type. Unwrap it so ``field_type in validators`` never hashes an
+    # unhashable dataclass.
+    if hasattr(field_type, "field_type"):
+        required = getattr(field_type, "required", required)
+        field_type = field_type.field_type
+
     # Check required
     if value is None:
         if required:
@@ -2094,7 +2101,7 @@ def validate_field(
         FieldType.CURRENCY: validate_currency,
     }
 
-    if field_type in validators:
+    if isinstance(field_type, FieldType) and field_type in validators:
         return validators[field_type](value)
 
     # Default validation for other types

@@ -98,8 +98,9 @@ module.exports = {
         },
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        display: ['var(--font-display)', 'var(--font-sans)', 'ui-sans-serif', 'sans-serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'monospace'],
       },
       // Phase 8 — typography scale (see design.md).
       fontSize: {
@@ -121,7 +122,7 @@ module.exports = {
         'elev-modal': '0 25px 50px -12px rgb(0 0 0 / 0.25)',
         // Legacy aliases.
         'soft': '0 2px 15px -3px rgb(0 0 0 / 0.07), 0 10px 20px -2px rgb(0 0 0 / 0.04)',
-        'glow': '0 0 20px rgb(59 130 246 / 0.3)',
+        'glow': '0 0 24px rgb(34 211 238 / 0.35)',
         'inner-soft': 'inset 0 2px 4px 0 rgb(0 0 0 / 0.05)',
       },
       transitionDuration: {
@@ -169,7 +170,7 @@ module.exports = {
       backgroundImage: {
         'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
         'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))',
-        'mesh-gradient': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+        'mesh-gradient': 'linear-gradient(135deg, #0891b2 0%, #059669 100%)',
       },
       borderRadius: {
         '4xl': '2rem',

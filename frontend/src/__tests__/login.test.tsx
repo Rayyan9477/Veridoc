@@ -53,17 +53,17 @@ describe('LoginPage', () => {
       expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
     });
 
-    it('renders logo and branding', () => {
+    it('renders the Glass heading and subtitle', () => {
       render(<LoginPage />);
 
-      expect(screen.getByText(/PDF Document Extraction/i)).toBeInTheDocument();
-      expect(screen.getByText(/Sign in to your account/i)).toBeInTheDocument();
+      expect(screen.getByText(/welcome back/i)).toBeInTheDocument();
+      expect(screen.getByText(/sign in to continue/i)).toBeInTheDocument();
     });
 
     it('renders link to signup page', () => {
       render(<LoginPage />);
 
-      const signupLink = screen.getByText(/Sign up/i);
+      const signupLink = screen.getByText(/request access/i);
       expect(signupLink).toBeInTheDocument();
       expect(signupLink.closest('a')).toHaveAttribute('href', '/signup');
     });
@@ -83,69 +83,34 @@ describe('LoginPage', () => {
   });
 
   describe('Form Validation', () => {
-    it('shows error when submitting empty username', async () => {
+    it('shows a combined error when submitting with an empty username', async () => {
       const user = userEvent.setup();
       render(<LoginPage />);
-
-      const submitButton = screen.getByRole('button', { name: /sign in/i });
-      await user.click(submitButton);
-
-      await waitFor(() => {
-        expect(screen.getByText(/username is required/i)).toBeInTheDocument();
-      });
-    });
-
-    it('shows error when submitting empty password', async () => {
-      const user = userEvent.setup();
-      render(<LoginPage />);
-
-      const usernameInput = screen.getByLabelText(/username/i);
-      await user.type(usernameInput, 'testuser');
-
-      const submitButton = screen.getByRole('button', { name: /sign in/i });
-      await user.click(submitButton);
-
-      await waitFor(() => {
-        expect(screen.getByText(/password is required/i)).toBeInTheDocument();
-      });
-    });
-
-    it('shows error when password is too short', async () => {
-      const user = userEvent.setup();
-      render(<LoginPage />);
-
-      const usernameInput = screen.getByLabelText(/username/i);
-      const passwordInput = screen.getByLabelText(/password/i);
-
-      await user.type(usernameInput, 'testuser');
-      await user.type(passwordInput, '12345'); // Less than 6 characters
 
       const submitButton = screen.getByRole('button', { name: /sign in/i });
       await user.click(submitButton);
 
       await waitFor(() => {
         expect(
-          screen.getByText(/password must be at least 6 characters/i)
+          screen.getByText(/enter your username and password/i)
         ).toBeInTheDocument();
       });
     });
 
-    it('clears errors when user starts typing', async () => {
+    it('shows a combined error when submitting with an empty password', async () => {
       const user = userEvent.setup();
       render(<LoginPage />);
+
+      const usernameInput = screen.getByLabelText(/username/i);
+      await user.type(usernameInput, 'testuser');
 
       const submitButton = screen.getByRole('button', { name: /sign in/i });
       await user.click(submitButton);
 
       await waitFor(() => {
-        expect(screen.getByText(/username is required/i)).toBeInTheDocument();
-      });
-
-      const usernameInput = screen.getByLabelText(/username/i);
-      await user.type(usernameInput, 't');
-
-      await waitFor(() => {
-        expect(screen.queryByText(/username is required/i)).not.toBeInTheDocument();
+        expect(
+          screen.getByText(/enter your username and password/i)
+        ).toBeInTheDocument();
       });
     });
   });

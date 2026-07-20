@@ -79,6 +79,7 @@ class VLMBackendName(str, Enum):
     LM_STUDIO = "lm_studio"
     VLLM = "vllm"
     GEMMA = "gemma"
+    QWEN_CLOUD = "qwen_cloud"
 
 
 class VLMMode(str, Enum):
@@ -264,6 +265,61 @@ class GemmaBackendSettings(BaseSettings):
     )
 
 
+class QwenCloudBackendSettings(BaseSettings):
+    """Backend settings for Qwen Cloud (Alibaba Model Studio).
+
+    Model Studio exposes an OpenAI-compatible endpoint that serves every
+    Qwen model from a SINGLE base URL — so heterogeneity is "same endpoint,
+    different model id per society role" (unlike LM Studio's per-port model).
+    The factory in ``src/client/backends/factory.py`` builds a
+    ``QwenCloudBackend`` from this block when ``VLM_BACKEND=qwen_cloud``.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="VLM_QWEN_CLOUD_",
+        extra="ignore",
+    )
+
+    primary_url: str = Field(
+        default="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        description=(
+            "OpenAI-compatible Model Studio base URL. International/Singapore: "
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1 ; "
+            "Mainland: https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ),
+    )
+    api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Model Studio / DashScope API key (Bearer auth).",
+    )
+    primary_model: str = Field(
+        default="qwen-vl-max",
+        description="PRIMARY role model (Extractor / Pass-1).",
+    )
+    secondary_model: str = Field(
+        default="qwen2.5-vl-72b-instruct",
+        description=(
+            "SECONDARY role model (Auditor / Pass-2). Different generation "
+            "than PRIMARY → genuine heterogeneity."
+        ),
+    )
+    critic_model: str = Field(
+        default="qwen-vl-plus",
+        description="CRITIC role model (independent verifier / tie-break).",
+    )
+    force_json_object: bool = Field(
+        default=True,
+        description=(
+            "When True (the default for Qwen Cloud), constrained decoding uses "
+            "response_format={'type':'json_object'} instead of json_schema. "
+            "Several DashScope Qwen-VL models (e.g. qwen3-vl-plus) reject strict "
+            "json_schema, and json_object is universally accepted, so a fresh "
+            "clone works out of the box. Set False only if your models accept "
+            "json_schema and you want decode-time schema enforcement."
+        ),
+    )
+
+
 class VLMSettings(BaseSettings):
     """Top-level VLM stack settings (Phase 0 + Phase K).
 
@@ -293,6 +349,9 @@ class VLMSettings(BaseSettings):
     lm_studio: LMStudioBackendSettings = Field(default_factory=LMStudioBackendSettings)
     vllm: VLLMBackendSettings = Field(default_factory=VLLMBackendSettings)
     gemma: GemmaBackendSettings = Field(default_factory=GemmaBackendSettings)
+    qwen_cloud: QwenCloudBackendSettings = Field(
+        default_factory=QwenCloudBackendSettings
+    )
 
     # V3 Phase 7 — process-wide VLM queue-depth gate. ``0`` disables.
     # Production deployments should set this to a value matching the
@@ -306,6 +365,20 @@ class VLMSettings(BaseSettings):
             "0 = unbounded (legacy default). Set to N>0 to gate "
             "concurrency at the application level (in addition to "
             "any backend-side limits like vLLM's --max-num-batched-tokens)."
+        ),
+    )
+
+    # === D2 — true role-based model rotation ===
+    role_models: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Explicit role→model override map (env VLM_ROLE_MODELS as JSON, "
+            'e.g. {"primary": "...", "secondary": "...", "critic": "..."}). '
+            "When set, an agent's role selects a distinct model — the D2 "
+            "heterogeneity mechanism (Extractor→A / Auditor→B / Critic→C). "
+            "Empty = derive from the active backend block (qwen_cloud is "
+            "multi-model; other backends keep their single model, preserving "
+            "legacy behaviour)."
         ),
     )
 
@@ -323,6 +396,38 @@ class VLMSettings(BaseSettings):
         if isinstance(v, str):
             return v.lower()
         return v
+
+    def role_model(self, role: Any) -> str | None:
+        """Resolve a ``VLMRole`` (or its string value) to a model id, or None.
+
+        Precedence:
+          1. explicit ``role_models`` map (any backend);
+          2. the ``qwen_cloud`` per-role blocks (it is inherently multi-model,
+             so its three distinct defaults give rotation out of the box);
+          3. ``None`` — the caller keeps the client default / task routing,
+             which is byte-identical to pre-D2 behaviour for lm_studio / vllm /
+             gemma with an empty ``role_models`` map.
+        """
+        key = getattr(role, "value", role)
+        if not isinstance(key, str):
+            return None
+        key = key.lower()
+
+        if self.role_models:
+            explicit = self.role_models.get(key)
+            if explicit:
+                return explicit
+
+        backend = getattr(self.backend, "value", self.backend)
+        if backend == "qwen_cloud":
+            qc = self.qwen_cloud
+            return {
+                "primary": qc.primary_model,
+                "lite": qc.primary_model,
+                "secondary": qc.secondary_model,
+                "critic": qc.critic_model,
+            }.get(key)
+        return None
 
 
 class LMStudioSettings(BaseSettings):
@@ -364,6 +469,13 @@ class LMStudioSettings(BaseSettings):
     retry_max_wait: Annotated[int, Field(ge=1, le=300)] = Field(
         default=30,
         description="Maximum wait time between retries in seconds",
+    )
+    api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "API key for authenticated backends (e.g. Qwen Cloud / Model "
+            "Studio). Blank for local LM Studio, which ignores auth."
+        ),
     )
 
     @property
@@ -543,6 +655,27 @@ class ExtractionSettings(BaseSettings):
     batch_size: Annotated[int, Field(ge=1, le=50)] = Field(
         default=5,
         description="Batch size for processing multiple pages",
+    )
+
+    # === Pipeline pre-stages (default ON; disable for a lean/fast path) ===
+    # The VLM-first pre-stages (layout / component / table / adaptive-schema)
+    # add several VLM calls per page and, on cloud backends, can retry on
+    # edge cases. A "lean" run disables them so only the core verification
+    # society (Extractor -> Auditor -> Reconciler -> Critic -> Validator) runs.
+    enable_vlm_first: bool = Field(
+        default=True,
+        description=(
+            "Run the VLM-first pre-stages (layout, component detection, adaptive "
+            "schema generation). Disable for a lean, low-latency demo path."
+        ),
+    )
+    enable_splitter: bool = Field(
+        default=True,
+        description="Run the multi-document boundary splitter. Disable for single-doc / demo.",
+    )
+    enable_table_detection: bool = Field(
+        default=True,
+        description="Run cell-level table detection. Disable for table-free docs / demo.",
     )
 
     # === V3 Phase 2 — heterogeneous dual-VLM ===
@@ -1107,6 +1240,23 @@ class CalibrationSettings(BaseSettings):
         default=Path("./data/calibration"),
         description="Directory for calibration model persistence",
     )
+    # D1 — HITL learning loops. When on, reviewer corrections train the
+    # calibrator (add_point + periodic fit) AND populate correction memory
+    # so the next extraction's prompt carries the learned warning. Default
+    # OFF so existing behaviour is byte-identical until an operator opts in.
+    online_learning: bool = Field(
+        default=False,
+        description=(
+            "Enable HITL learning loops: reviewer corrections train the "
+            "calibrator and populate correction memory (prompt warnings + "
+            "reconciler field history)."
+        ),
+    )
+    online_fit_every: int = Field(
+        default=10,
+        ge=1,
+        description="Refit the calibrator after this many new HITL correction points.",
+    )
 
     @field_validator("storage_path", mode="before")
     @classmethod
@@ -1231,6 +1381,34 @@ class ModelRoutingSettings(BaseSettings):
     task_models: dict[str, str] = Field(
         default_factory=dict,
         description="Mapping of task name to model ID (e.g. layout_analysis: florence-2)",
+    )
+
+
+class OSSSettings(BaseSettings):
+    """Alibaba Cloud OSS artifact storage (Phase E).
+
+    When enabled, extraction results (and, at the writer call-sites, receipts /
+    overlays / audit logs) are mirrored to an OSS bucket so the deployed app has
+    durable, shareable object storage. Requires an OSS AccessKey pair (RAM),
+    which is DISTINCT from the Model Studio inference key.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="OSS_", extra="ignore")
+
+    enabled: bool = Field(default=False, description="Mirror artifacts to Alibaba OSS.")
+    endpoint: str = Field(
+        default="",
+        description="OSS endpoint, e.g. https://oss-ap-southeast-1.aliyuncs.com",
+    )
+    bucket: str = Field(default="", description="OSS bucket name.")
+    access_key_id: SecretStr = Field(
+        default=SecretStr(""), description="RAM AccessKey ID for OSS."
+    )
+    access_key_secret: SecretStr = Field(
+        default=SecretStr(""), description="RAM AccessKey secret for OSS."
+    )
+    prefix: str = Field(
+        default="veridoc/", description="Key prefix prepended to every uploaded object."
     )
 
 
@@ -1360,6 +1538,7 @@ class Settings(BaseSettings):
     provenance: ProvenanceSettings = Field(default_factory=ProvenanceSettings)
     profile: ProfileSettings = Field(default_factory=ProfileSettings)
     model_routing: ModelRoutingSettings = Field(default_factory=ModelRoutingSettings)
+    oss: OSSSettings = Field(default_factory=OSSSettings)
     phi: PHISettings = Field(default_factory=PHISettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)

@@ -529,13 +529,6 @@ class BaseAgent(ABC):
         from src.client.constrained import DecodingTrace as _DecodingTrace
 
         self._vlm_calls += 1
-        request = VisionRequest(
-            image_data=image_data,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
 
         # Build the OpenAI-style response_format from the Pydantic schema.
         # Same shape LMStudioBackend would build; centralised here so
@@ -543,6 +536,23 @@ class BaseAgent(ABC):
         # observe the schema kwarg without needing the backend factory.
         schema_dict = schema.model_json_schema()
         response_format = self._schema_response_format(schema_dict)
+
+        # DashScope / OpenAI ``json_object`` mode rejects the request (400)
+        # unless the literal token "json" appears somewhere in the messages.
+        # Guarantee it here so no individual prompt author has to remember —
+        # only fires when json_object is actually selected (qwen_cloud +
+        # force_json_object), so json_schema call-sites are byte-identical.
+        if response_format.get("type") == "json_object":
+            if "json" not in f"{prompt}\n{system_prompt or ''}".lower():
+                prompt = f"{prompt}\n\nRespond with a single JSON object."
+
+        request = VisionRequest(
+            image_data=image_data,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
 
         # D2: resolve the per-request model (role rotation → task routing →
         # default). The resolved id is also stamped into the DecodingTrace
