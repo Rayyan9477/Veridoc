@@ -1,0 +1,306 @@
+<title>Veridoc — The Verification Society (Architecture)</title>
+<style>
+  :root {
+    --bg: #070a10;
+    --bg-2: #0a0e15;
+    --ink: #e8eef6;
+    --ink-2: #aab6c6;
+    --ink-3: #6b7788;
+    --line: rgba(148, 170, 200, 0.14);
+    --glass: rgba(148, 175, 210, 0.045);
+    --glass-2: rgba(150, 180, 220, 0.075);
+    --glass-brd: rgba(160, 190, 225, 0.14);
+    --verify: #22d3ee;      /* cyan — the "verify" accent */
+    --verify-dim: rgba(34, 211, 238, 0.14);
+    --hi: #34d399;          /* confidence: high */
+    --med: #fbbf24;         /* confidence: medium */
+    --lo: #fb7185;          /* confidence: low */
+    --qwen: #8b93f8;        /* model chips — indigo, distinct from accent */
+    --qwen-dim: rgba(139, 147, 248, 0.13);
+    --shadow: 0 24px 60px -28px rgba(0,0,0,0.8);
+    --r: 16px;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, monospace;
+    --sans: "Sora", "Manrope", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  :root[data-theme="light"] {
+    --bg: #eef2f7; --bg-2: #f6f8fb; --ink: #0d1420; --ink-2: #3c4a5c; --ink-3: #6b7788;
+    --line: rgba(30,50,80,0.12); --glass: rgba(255,255,255,0.6); --glass-2: rgba(255,255,255,0.8);
+    --glass-brd: rgba(30,50,80,0.12); --verify: #0891b2; --verify-dim: rgba(8,145,178,0.12);
+    --qwen: #5b63d6; --qwen-dim: rgba(91,99,214,0.1); --shadow: 0 20px 50px -30px rgba(20,40,80,0.4);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.5;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+  /* ambient field */
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background:
+      radial-gradient(1100px 620px at 78% -8%, rgba(34,211,238,0.10), transparent 60%),
+      radial-gradient(900px 560px at 8% 8%, rgba(139,147,248,0.10), transparent 62%),
+      radial-gradient(1200px 800px at 50% 118%, rgba(52,211,153,0.06), transparent 60%);
+  }
+  body::after { /* grain */
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.32;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+  .wrap { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; padding: 40px 22px 64px; }
+
+  /* ---- header ---- */
+  .eyebrow {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--verify); margin: 0 0 14px; display: flex; align-items: center; gap: 10px;
+  }
+  .eyebrow::before { content:""; width: 26px; height: 1px; background: var(--verify); opacity: 0.7; }
+  h1 {
+    font-size: clamp(30px, 5.4vw, 52px); line-height: 1.02; letter-spacing: -0.028em;
+    font-weight: 700; margin: 0; text-wrap: balance;
+  }
+  h1 .soft { color: var(--ink-2); font-weight: 600; }
+  .lede {
+    margin: 16px 0 0; max-width: 62ch; color: var(--ink-2); font-size: clamp(14.5px, 1.7vw, 17px);
+  }
+  .lede b { color: var(--ink); font-weight: 600; }
+  .proof {
+    margin-top: 20px; display: inline-flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 9px 15px; border: 1px solid rgba(52,211,153,0.35); border-radius: 999px;
+    background: rgba(52,211,153,0.08); font-size: 13px; color: var(--ink);
+  }
+  .proof .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--hi);
+    box-shadow: 0 0 0 4px rgba(52,211,153,0.16); animation: pulse 2.4s ease-in-out infinite; }
+  .proof code { font-family: var(--mono); color: var(--hi); font-size: 12.5px; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.45} }
+  @media (prefers-reduced-motion: reduce){ .proof .dot{animation:none} }
+
+  /* ---- section scaffolding ---- */
+  .flow { margin-top: 40px; display: flex; flex-direction: column; gap: 14px; }
+  .rail-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--ink-3); margin: 0 2px 2px;
+  }
+  .stage-row { display: grid; grid-template-columns: 1fr auto 1fr auto 1.35fr auto 1fr; align-items: stretch; gap: 8px; }
+  @media (max-width: 900px){ .stage-row{ grid-template-columns: 1fr; } .arrow{ display:none } }
+
+  .card {
+    position: relative; border: 1px solid var(--glass-brd); background: var(--glass);
+    border-radius: var(--r); padding: 16px 16px 15px; backdrop-filter: blur(14px) saturate(1.1);
+    -webkit-backdrop-filter: blur(14px) saturate(1.1); box-shadow: var(--shadow);
+  }
+  .card h3 { margin: 0 0 3px; font-size: 14.5px; letter-spacing: -0.01em; font-weight: 650; }
+  .card .k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-3); }
+  .card p { margin: 7px 0 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+  .card .tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+  .tag { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); padding: 3px 7px;
+    border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,0.02); }
+
+  .arrow { display: flex; align-items: center; justify-content: center; color: var(--ink-3); }
+  .arrow svg { width: 26px; height: 26px; }
+
+  /* the society — centerpiece */
+  .society {
+    border: 1px solid rgba(34,211,238,0.4); background:
+      linear-gradient(180deg, rgba(34,211,238,0.07), rgba(34,211,238,0.02));
+    box-shadow: 0 0 0 1px rgba(34,211,238,0.08), var(--shadow), 0 0 44px -14px rgba(34,211,238,0.4);
+    padding: 15px 15px 16px;
+  }
+  .society > .k { color: var(--verify); }
+  .society h3 { display:flex; align-items:center; gap:8px; }
+  .agents { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 11px; }
+  .agent { border: 1px solid var(--glass-brd); background: var(--glass-2); border-radius: 11px; padding: 10px 11px; }
+  .agent .role { font-size: 12.5px; font-weight: 640; display:flex; align-items:center; gap:6px; }
+  .agent .desc { font-size: 11px; color: var(--ink-3); margin-top: 3px; line-height: 1.4; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-family: var(--mono);
+    font-size: 10.5px; color: var(--qwen); background: var(--qwen-dim);
+    border: 1px solid rgba(139,147,248,0.34); border-radius: 999px; padding: 3px 9px;
+  }
+  .chip::before { content:""; width:6px; height:6px; border-radius:50%; background: var(--qwen); }
+  .agent.full { grid-column: 1 / -1; }
+  .xexam {
+    grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--verify); margin: 2px 0; opacity: 0.9;
+  }
+  .xexam .ln { height: 1px; flex: 1; background: linear-gradient(90deg, transparent, var(--verify), transparent); opacity: 0.5; }
+
+  .out-list { display: flex; flex-direction: column; gap: 6px; margin-top: 9px; }
+  .out-list .o { display:flex; align-items:center; gap:8px; font-size: 12px; color: var(--ink-2); }
+  .out-list .o svg { width: 14px; height: 14px; flex: none; color: var(--verify); }
+
+  /* qwen spine */
+  .spine { margin-top: 14px; border: 1px solid rgba(139,147,248,0.28); border-radius: var(--r);
+    background: linear-gradient(180deg, var(--qwen-dim), transparent); padding: 14px 16px;
+    display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center; }
+  @media (max-width: 720px){ .spine{ grid-template-columns: 1fr; } }
+  .spine .brand { display:flex; flex-direction:column; gap:3px; }
+  .spine .brand .t { font-weight: 680; font-size: 14px; display:flex; align-items:center; gap:8px; }
+  .spine .brand .s { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); letter-spacing: 0.04em; }
+  .spine .models { display:flex; gap: 8px; flex-wrap: wrap; }
+  .mrole { flex: 1 1 150px; border: 1px solid var(--glass-brd); border-radius: 11px; padding: 9px 11px; background: var(--glass); }
+  .mrole .r { font-size: 10px; font-family: var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); }
+  .mrole .m { font-family: var(--mono); font-size: 12.5px; color: var(--qwen); margin-top: 2px; font-weight: 600; }
+  .mrole .n { font-size: 10.5px; color: var(--ink-3); margin-top: 2px; }
+
+  /* rails */
+  .rails { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+  @media (max-width: 720px){ .rails{ grid-template-columns: 1fr; } }
+  .rail { border: 1px dashed var(--glass-brd); border-radius: var(--r); background: rgba(255,255,255,0.014); padding: 14px 15px; }
+  .rail .k { color: var(--verify); }
+  .rail .metrics { display:flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  .metric { font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 3px 8px; background: rgba(255,255,255,0.02); }
+  .metric b { color: var(--hi); font-weight: 600; }
+
+  /* pillars */
+  .pillars { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 22px; }
+  @media (max-width: 820px){ .pillars{ grid-template-columns: repeat(2, 1fr); } }
+  .pillar { border: 1px solid var(--glass-brd); border-radius: 12px; background: var(--glass); padding: 12px 12px 13px; }
+  .pillar .no { font-family: var(--mono); font-size: 10px; color: var(--verify); letter-spacing: 0.1em; }
+  .pillar .t { font-size: 12.5px; font-weight: 620; margin-top: 5px; line-height: 1.28; }
+
+  /* confidence legend + footer */
+  .legend { display:flex; align-items:center; gap: 16px; flex-wrap: wrap; margin-top: 22px;
+    font-size: 11.5px; color: var(--ink-3); font-family: var(--mono); }
+  .legend .sw { display:inline-flex; align-items:center; gap:6px; }
+  .legend .sw i { width: 9px; height: 9px; border-radius: 50%; display:inline-block; }
+  footer { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--line);
+    display:flex; justify-content: space-between; align-items:center; gap: 12px; flex-wrap: wrap;
+    font-size: 12px; color: var(--ink-3); }
+  footer .tag { color: var(--ink-2); }
+  footer b { color: var(--ink); }
+
+  /* load-in */
+  @media (prefers-reduced-motion: no-preference){
+    .anim { opacity: 0; transform: translateY(10px); animation: rise 0.6s cubic-bezier(0.16,1,0.3,1) forwards; }
+    .flow > *, .pillars > *, .rails > * { animation-delay: var(--d, 0s); }
+    @keyframes rise { to { opacity: 1; transform: none; } }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow anim">Architecture · Qwen Cloud Hackathon · Agent Society</p>
+    <h1 class="anim" style="--d:.04s">The Verification <span class="soft">Society</span></h1>
+    <p class="lede anim" style="--d:.09s">Every extractor hands you JSON from one model and asks you to trust it. Veridoc runs a <b>society of models</b> — an Extractor and an Auditor read the page independently, a Reconciler arbitrates, and a Critic breaks ties, <b>each on a different Qwen model</b> — so every field is cross-examined, grounded to the source pixel, and shipped with calibrated confidence.</p>
+    <div class="proof anim" style="--d:.14s"><span class="dot"></span> Validated live on Qwen Cloud — <code>21 fields</code> extracted from a real invoice, <code>3 distinct models</code> cross-examining, provenance + calibrated confidence emitted.</div>
+  </header>
+
+  <div class="flow">
+    <p class="rail-label anim" style="--d:.18s">Extraction pipeline · LangGraph StateGraph</p>
+    <div class="stage-row">
+      <!-- Ingest -->
+      <div class="card anim" style="--d:.20s">
+        <div class="k">01 · Ingest</div>
+        <h3>Any document</h3>
+        <p>PDF, scan, or phone photo — rendered to normalized page images.</p>
+        <div class="tags"><span class="tag">invoice</span><span class="tag">contract</span><span class="tag">form</span><span class="tag">superbill</span></div>
+      </div>
+      <div class="arrow anim" style="--d:.22s" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+      <!-- Understand -->
+      <div class="card anim" style="--d:.24s">
+        <div class="k">02 · Understand</div>
+        <h3>Layout &amp; schema</h3>
+        <p>Classify, split, detect layout + tables, and adapt the target schema to the document.</p>
+        <div class="tags"><span class="tag">analyzer</span><span class="tag">layout</span><span class="tag">tables</span><span class="tag">schema-gen</span></div>
+      </div>
+      <div class="arrow anim" style="--d:.26s" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+      <!-- SOCIETY -->
+      <div class="card society anim" style="--d:.28s">
+        <div class="k">03 · The Society</div>
+        <h3><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--verify)" stroke-width="1.7"><circle cx="7" cy="8" r="2.4"/><circle cx="17" cy="8" r="2.4"/><circle cx="12" cy="16" r="2.4"/><path d="M8.6 9.4 11 14M15.4 9.4 13 14M9 8h6"/></svg> Models cross-examine</h3>
+        <div class="agents">
+          <div class="agent">
+            <div class="role">Extractor <span style="color:var(--ink-3);font-weight:400">· Pass 1</span></div>
+            <div class="desc">Reads every field first pass.</div>
+            <span class="chip">qwen3-vl-plus</span>
+          </div>
+          <div class="agent">
+            <div class="role">Auditor <span style="color:var(--ink-3);font-weight:400">· Pass 2</span></div>
+            <div class="desc">Re-reads independently + bboxes.</div>
+            <span class="chip">qwen-vl-max</span>
+          </div>
+          <div class="xexam"><span class="ln"></span>cross-examine<span class="ln"></span></div>
+          <div class="agent">
+            <div class="role">Reconciler</div>
+            <div class="desc">5-step arbitration on disagreement — bbox IoU, history, round-trip.</div>
+          </div>
+          <div class="agent">
+            <div class="role">Critic</div>
+            <div class="desc">Independent verifier breaks ties + trust score.</div>
+            <span class="chip">qwen-vl-plus</span>
+          </div>
+          <div class="agent full">
+            <div class="role">Validator + live Calibrator</div>
+            <div class="desc">Schema + hallucination checks; raw confidence → calibrated (Platt / isotonic), per profile.</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow anim" style="--d:.30s" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+      <!-- Emit -->
+      <div class="card anim" style="--d:.32s">
+        <div class="k">04 · Emit</div>
+        <h3>JSON you can trust</h3>
+        <div class="out-list">
+          <div class="o"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M4 12h16M4 17h10"/></svg> Schema-bound JSON / FHIR</div>
+          <div class="o"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg> Per-field pixel provenance</div>
+          <div class="o"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v18M4 12h16"/></svg> Calibrated confidence</div>
+          <div class="o"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l7 4v5c0 4-3 7-7 9-4-2-7-5-7-9V7z"/></svg> Signed receipt + audit chain</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Qwen Cloud spine -->
+  <div class="spine anim" style="--d:.36s">
+    <div class="brand">
+      <div class="t"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--qwen)" stroke-width="1.6"><path d="M4 15a4 4 0 0 1 1-7.9A5.5 5.5 0 0 1 20 9.5 3.5 3.5 0 0 1 19 16H6a2 2 0 0 1-2-1z"/></svg> Qwen Cloud · Alibaba Model Studio</div>
+      <div class="s">one OpenAI-compatible endpoint · role → model rotation</div>
+    </div>
+    <div class="models">
+      <div class="mrole"><div class="r">Primary · Extractor</div><div class="m">qwen3-vl-plus</div><div class="n">Qwen3-VL generation</div></div>
+      <div class="mrole"><div class="r">Secondary · Auditor</div><div class="m">qwen-vl-max</div><div class="n">different generation → true heterogeneity</div></div>
+      <div class="mrole"><div class="r">Critic · Verifier</div><div class="m">qwen-vl-plus</div><div class="n">independent tie-breaker</div></div>
+    </div>
+  </div>
+
+  <!-- Rails: the experiment spine + learning loops -->
+  <div class="rails">
+    <div class="rail anim" style="--d:.40s">
+      <div class="k rail-label">Experiment &amp; eval harness</div>
+      <p class="card-p" style="font-size:12.5px;color:var(--ink-2);margin:8px 0 0">One config runs a golden set through the society and scores it — so every change is measured, not guessed.</p>
+      <div class="metrics"><span class="metric">F1 <b>micro/macro</b></span><span class="metric">calibration <b>ECE · Brier</b></span><span class="metric">injection <b>catch-rate</b></span><span class="metric">A/B <b>Δ</b></span></div>
+    </div>
+    <div class="rail anim" style="--d:.44s">
+      <div class="k rail-label">Live learning loops</div>
+      <p style="font-size:12.5px;color:var(--ink-2);margin:8px 0 0">Human corrections train the system: each fix feeds the calibrator and correction memory, so the next extraction is sharper and better-warned.</p>
+      <div class="metrics"><span class="metric">HITL → <b>calibration.fit()</b></span><span class="metric">correction <b>memory</b></span><span class="metric">harness-measured <b>ΔECE</b></span></div>
+    </div>
+  </div>
+
+  <!-- Pillars -->
+  <div class="pillars">
+    <div class="pillar anim" style="--d:.48s"><div class="no">Pillar 01</div><div class="t">Heterogeneous society of models</div></div>
+    <div class="pillar anim" style="--d:.51s"><div class="no">Pillar 02</div><div class="t">Pixel-grounded provenance</div></div>
+    <div class="pillar anim" style="--d:.54s"><div class="no">Pillar 03</div><div class="t">Calibrated confidence</div></div>
+    <div class="pillar anim" style="--d:.57s"><div class="no">Pillar 04</div><div class="t">Verifiable &amp; certifiable</div></div>
+    <div class="pillar anim" style="--d:.60s"><div class="no">Pillar 05</div><div class="t">Open &amp; deployment-flexible</div></div>
+  </div>
+
+  <div class="legend">
+    <span>Confidence language:</span>
+    <span class="sw"><i style="background:var(--hi)"></i> high</span>
+    <span class="sw"><i style="background:var(--med)"></i> medium</span>
+    <span class="sw"><i style="background:var(--lo)"></i> low → human review</span>
+  </div>
+
+  <footer>
+    <span class="tag">Apache 2.0 · deployable on <b>Qwen Cloud</b> or fully on-prem</span>
+    <span>LangGraph · FastAPI · Next.js “Glass” UI · <b>2,600+ tests</b></span>
+  </footer>
+</div>

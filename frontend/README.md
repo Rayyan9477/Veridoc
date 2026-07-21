@@ -1,6 +1,6 @@
-# PDF Document Extraction - Frontend
+# Veridoc — Frontend
 
-A modern, professional React/Next.js frontend for the PDF Document Extraction System.
+The Glass UI for **Veridoc**, the verification layer for document AI — a modern React/Next.js frontend for the multi-agent extraction society (Source View click-to-pixel, HITL review, schema designer, admin).
 
 ## Features
 

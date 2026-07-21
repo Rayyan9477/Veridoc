@@ -18,12 +18,14 @@ if (
 const nextConfig = {
   reactStrictMode: true,
 
-  // API proxy to backend
+  // API proxy to backend. In docker-compose / ECS this targets the ``api``
+  // service (API_PROXY_TARGET=http://api:8000); locally it defaults to :8000.
   async rewrites() {
+    const target = process.env.API_PROXY_TARGET || 'http://localhost:8000';
     return [
       {
         source: '/api/:path*',
-        destination: 'http://localhost:8000/api/:path*',
+        destination: `${target}/api/:path*`,
       },
     ];
   },
@@ -31,7 +33,7 @@ const nextConfig = {
   // Environment variables
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
-    NEXT_PUBLIC_APP_NAME: 'PDF Document Extraction',
+    NEXT_PUBLIC_APP_NAME: 'Veridoc',
     NEXT_PUBLIC_APP_VERSION: '1.0.0',
   },
 

@@ -1,7 +1,7 @@
 {
-  "name": "pdf-extraction-frontend",
+  "name": "veridoc-frontend",
   "version": "1.0.0",
-  "description": "PDF Document Extraction System - Frontend",
+  "description": "Veridoc — the verification layer for document AI (frontend)",
   "private": true,
   "scripts": {
     "dev": "next dev",

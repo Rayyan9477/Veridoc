@@ -30,16 +30,35 @@ export function AuthenticatedImage({
 }: AuthenticatedImageProps) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  // When the blob fetch fails but the endpoint is reachable unauthenticated,
+  // fall back to a plain <img>. A cross-origin <img> is not subject to the
+  // CORS read restrictions a fetch() is, so this recovers the page render
+  // instead of leaving Source View with nothing to draw bboxes on.
+  const [useDirectSrc, setUseDirectSrc] = useState(false);
   const currentUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setError(false);
     setBlobUrl(null);
+    setUseDirectSrc(false);
 
     const token = getAccessToken();
-    const headers: Record<string, string> = { Accept: 'image/*' };
-    if (token) headers.Authorization = `Bearer ${token}`;
+
+    // No token => nothing to attach, so the fetch+blob indirection buys us
+    // nothing and only adds a CORS-mode request that can fail where a plain
+    // <img> would not. Render the <img> directly instead.
+    if (!token) {
+      setUseDirectSrc(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const headers: Record<string, string> = {
+      Accept: 'image/*',
+      Authorization: `Bearer ${token}`,
+    };
 
     fetch(src, { headers })
       .then((resp) => {
@@ -55,8 +74,7 @@ export function AuthenticatedImage({
       })
       .catch(() => {
         if (cancelled) return;
-        setError(true);
-        onError?.();
+        setUseDirectSrc(true);
       });
 
     return () => {
@@ -79,6 +97,22 @@ export function AuthenticatedImage({
         className={className}
         role="img"
         aria-label={`Failed to load: ${alt}`}
+      />
+    );
+  }
+
+  if (useDirectSrc) {
+    // eslint-disable-next-line @next/next/no-img-element
+    return (
+      <img
+        src={src}
+        alt={alt}
+        className={className}
+        onLoad={(e) => onLoad?.({ currentTarget: e.currentTarget })}
+        onError={() => {
+          setError(true);
+          onError?.();
+        }}
       />
     );
   }
