@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter } from 'next/font/google';
+import { Sora, Manrope, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { Providers } from '@/components/providers';
 import { Toaster } from 'react-hot-toast';
@@ -7,10 +7,24 @@ import { PageErrorBoundary } from '@/components/ErrorBoundary';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { BRANDING } from '@/lib/branding';
 
-const inter = Inter({
+// Glass design system fonts — Sora (display), Manrope (UI), JetBrains Mono
+// (IDs / model names / confidence values). Self-hosted by next/font.
+const manrope = Manrope({
   subsets: ['latin'],
   display: 'swap',
-  variable: '--font-inter',
+  variable: '--font-sans',
+});
+
+const sora = Sora({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-display',
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-mono',
 });
 
 // V3 Phase 8 — branding metadata read from src/lib/branding.ts.
@@ -42,8 +56,8 @@ export const viewport: Viewport = {
   // V3 Phase 8 — theme color uses CSS custom property updated by
   // ThemeProvider on dark-mode toggle. Static fallback below.
   themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#3b82f6' },
-    { media: '(prefers-color-scheme: dark)', color: '#1e293b' },
+    { media: '(prefers-color-scheme: light)', color: '#0891b2' },
+    { media: '(prefers-color-scheme: dark)', color: '#07090d' },
   ],
 };
 
@@ -53,8 +67,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={inter.variable} suppressHydrationWarning>
-      <body className="min-h-screen bg-canvas font-sans antialiased text-primary">
+    <html
+      lang="en"
+      className={`${manrope.variable} ${sora.variable} ${jetbrainsMono.variable}`}
+      suppressHydrationWarning
+    >
+      <body className="min-h-screen bg-canvas font-sans antialiased text-text-primary">
         <ThemeProvider>
           <Providers>
             <PageErrorBoundary>

@@ -1,273 +1,227 @@
 'use client';
 
-import React from 'react';
-import { motion } from 'framer-motion';
+/**
+ * Help — in-app docs.
+ *
+ * A searchable reference for the core Veridoc concepts (confidence
+ * bands, Source View, profiles, schemas) plus the keyboard-shortcut
+ * reference. Content is static by design — this is documentation, not
+ * live data.
+ */
+
+import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
-  HelpCircle,
-  BookOpen,
-  MessageCircle,
-  FileText,
-  ExternalLink,
-  Mail,
-  Github,
-  AlertCircle,
+  Boxes,
+  Command,
+  Compass,
+  Keyboard,
+  Layers,
+  MousePointerClick,
+  Rocket,
+  Search,
+  Workflow,
 } from 'lucide-react';
 import { AppLayout } from '@/components/layout';
-import { Card, CardHeader, CardContent } from '@/components/ui';
+import type { ComponentType } from 'react';
+
+interface DocSection {
+  id: string;
+  title: string;
+  icon: ComponentType<{ className?: string }>;
+  summary: string;
+  bullets: string[];
+  link?: { href: string; label: string };
+}
+
+const DOC_SECTIONS: DocSection[] = [
+  {
+    id: 'getting-started',
+    title: 'Getting started',
+    icon: Rocket,
+    summary: 'Upload a document, let Veridoc extract it, and review the result.',
+    bullets: [
+      'Upload a PDF (or a batch) from the Upload page — single or async processing.',
+      'Auto-detect picks a profile (Healthcare vs. General) and schema, or override both explicitly.',
+      'The dual-VLM pipeline extracts every field, cross-checks it, and assigns a calibrated confidence.',
+      'Flagged fields route to Human-in-the-loop review; everything else is ready to export.',
+      'Export to JSON, Excel, Markdown, or FHIR from the document page.',
+    ],
+    link: { href: '/documents/upload', label: 'Go to Upload' },
+  },
+  {
+    id: 'workflows',
+    title: 'Workflows',
+    icon: Workflow,
+    summary: 'How extraction, confidence, and the Source View reviewer loop fit together.',
+    bullets: [
+      'Confidence bands: green (≥ 0.85) is high-confidence and safe to trust, amber (0.5–0.85) deserves a glance, red (< 0.5) needs a correction before export.',
+      'Source View is the click-to-source interaction — click a field in the list and the rendered page jumps to and highlights its bounding box; click a highlighted box to select that field.',
+      'Every field carries a provenance timeline: Pass 1 (VLM) → Pass 2 (auditor) → Reconciler → Critic — so you can see exactly how a value was derived and where passes disagreed.',
+      'Keyboard stepping: n / p move to the next / previous field, ordered low-confidence-first so reviewers fix the riskiest fields before the safe ones.',
+      'Tasks that need a human sit in the HITL review queue until approved or corrected.',
+    ],
+    link: { href: '/review', label: 'Open HITL review' },
+  },
+  {
+    id: 'schemas',
+    title: 'Schemas',
+    icon: Boxes,
+    summary: 'The field definitions that tell the extractor what to look for.',
+    bullets: [
+      'A schema is a named list of fields (name, type, required, validation rules) targeted for extraction — e.g. CMS-1500, UB-04, Superbill, EOB.',
+      'Schemas can be browsed, versioned, and inspected on the Schemas page before you point an upload at one.',
+      'Pick a schema explicitly, or let profile auto-detection choose one based on the document.',
+    ],
+    link: { href: '/schemas', label: 'Browse schemas' },
+  },
+  {
+    id: 'profiles',
+    title: 'Profiles',
+    icon: Layers,
+    summary: 'Top-level modes that tune the whole pipeline for a document class.',
+    bullets: [
+      'Healthcare profile: CMS-1500 / UB-04 / EOB / Superbill schemas, NPI / CPT / ICD validators, PHI masking, and FHIR R4 emission.',
+      'General document profile: any PDF — invoices, contracts, forms, letters — plain JSON / Markdown / Excel output.',
+      'Auto-detect lets the analyzer pick the best profile for the document instead of forcing one.',
+    ],
+    link: { href: '/profiles', label: 'View profiles' },
+  },
+];
+
+interface Shortcut {
+  keys: string[];
+  description: string;
+}
+
+const SHORTCUTS: Shortcut[] = [
+  { keys: ['⌘', 'K'], description: 'Open the command palette — jump to any page or action.' },
+  { keys: ['/'], description: 'Focus the search bar.' },
+  { keys: ['g', 'd'], description: 'Go to Dashboard.' },
+  { keys: ['u'], description: 'Go to Upload.' },
+  { keys: ['n'], description: 'Next field in Source View (low-confidence first).' },
+  { keys: ['p'], description: 'Previous field in Source View.' },
+  { keys: ['↑', '↓'], description: 'Move selection within the command palette.' },
+  { keys: ['Esc'], description: 'Close the command palette or any open overlay.' },
+];
+
+function Kbd({ children }: { children: string }) {
+  return (
+    <kbd className="inline-flex items-center justify-center min-w-[1.75rem] px-1.5 py-0.5 rounded-md text-small font-mono glass-hairline text-text-secondary">
+      {children}
+    </kbd>
+  );
+}
 
 export default function HelpPage() {
-  const resources = [
-    {
-      icon: <BookOpen className="w-5 h-5" />,
-      title: 'Documentation',
-      description: 'Comprehensive guides and API reference',
-      link: '/docs',
-      external: false,
-    },
-    {
-      icon: <FileText className="w-5 h-5" />,
-      title: 'API Reference',
-      description: 'Detailed API endpoint documentation',
-      link: '/docs',
-      external: false,
-    },
-    {
-      icon: <Github className="w-5 h-5" />,
-      title: 'GitHub Repository',
-      description: 'Source code and issue tracking',
-      link: 'https://github.com/yourusername/pdf-extraction',
-      external: true,
-    },
-    {
-      icon: <MessageCircle className="w-5 h-5" />,
-      title: 'Community Forum',
-      description: 'Get help from the community',
-      link: '#',
-      external: true,
-    },
-  ];
+  const [query, setQuery] = useState('');
 
-  const faqs = [
-    {
-      question: 'How do I upload and process a document?',
-      answer:
-        'Navigate to the Upload page, select your PDF files, configure processing options (schema, format, priority), and click Upload. Documents will be processed asynchronously.',
-    },
-    {
-      question: 'What document types are supported?',
-      answer:
-        'The system supports CMS-1500, UB-04, Superbill, and EOB documents. You can view all available schemas on the Schemas page.',
-    },
-    {
-      question: 'How do I export processed data?',
-      answer:
-        'On the Documents page, click the export button for any processed document and choose your preferred format (JSON, Excel, or Markdown).',
-    },
-    {
-      question: 'What is PHI masking?',
-      answer:
-        'PHI (Protected Health Information) masking replaces sensitive healthcare data with redacted values to comply with HIPAA regulations.',
-    },
-  ];
-
-  const contactOptions = [
-    {
-      icon: <Mail className="w-5 h-5" />,
-      title: 'Email Support',
-      value: 'support@example.com',
-      action: 'mailto:support@example.com',
-    },
-    {
-      icon: <Github className="w-5 h-5" />,
-      title: 'Report an Issue',
-      value: 'GitHub Issues',
-      action: 'https://github.com/yourusername/pdf-extraction/issues',
-    },
-  ];
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return DOC_SECTIONS;
+    return DOC_SECTIONS.filter((section) =>
+      `${section.title} ${section.summary} ${section.bullets.join(' ')}`.toLowerCase().includes(q),
+    );
+  }, [query]);
 
   return (
     <AppLayout>
       <div className="space-y-6">
-        {/* Page Header */}
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="flex flex-col gap-4"
-        >
-          <div>
-            <h1 className="text-2xl font-bold text-surface-900">Help & Support</h1>
-            <p className="text-surface-500 mt-1">
-              Documentation, guides, and support resources
-            </p>
-          </div>
-        </motion.div>
+        <p className="text-body text-text-secondary max-w-2xl">
+          In-app documentation for Veridoc's core concepts, plus the full keyboard-shortcut
+          reference.
+        </p>
 
-        {/* Quick Links */}
-        <div>
-          <h2 className="text-lg font-bold text-surface-900 mb-4">Resources</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {resources.map((resource, index) => (
-              <motion.div
-                key={index}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.1 }}
-              >
-                <Card variant="outlined" padding="lg" className="h-full">
-                  <a
-                    href={resource.link}
-                    target={resource.external ? '_blank' : undefined}
-                    rel={resource.external ? 'noopener noreferrer' : undefined}
-                    className="flex items-start gap-4 group"
-                  >
-                    <div className="w-10 h-10 rounded-lg bg-primary-100 flex items-center justify-center flex-shrink-0 group-hover:bg-primary-200 transition-colors">
-                      {resource.icon}
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <h3 className="font-semibold text-surface-900 group-hover:text-primary-600 transition-colors">
-                          {resource.title}
-                        </h3>
-                        {resource.external && (
-                          <ExternalLink className="w-4 h-4 text-surface-400" />
-                        )}
-                      </div>
-                      <p className="text-sm text-surface-600">
-                        {resource.description}
-                      </p>
-                    </div>
-                  </a>
-                </Card>
-              </motion.div>
-            ))}
-          </div>
+        {/* Search */}
+        <div className="relative max-w-xl">
+          <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" aria-hidden />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search docs — confidence, source view, schemas, profiles…"
+            className="input pl-9"
+            aria-label="Search documentation"
+          />
         </div>
 
-        {/* FAQs */}
-        <div>
-          <h2 className="text-lg font-bold text-surface-900 mb-4">
-            Frequently Asked Questions
-          </h2>
-          <div className="space-y-4">
-            {faqs.map((faq, index) => (
-              <motion.div
-                key={index}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.4 + index * 0.1 }}
-              >
-                <Card variant="outlined" padding="lg">
-                  <div className="flex items-start gap-4">
-                    <div className="w-8 h-8 rounded-lg bg-info-100 flex items-center justify-center flex-shrink-0">
-                      <HelpCircle className="w-4 h-4 text-info-600" />
-                    </div>
-                    <div className="flex-1">
-                      <h3 className="font-semibold text-surface-900 mb-2">
-                        {faq.question}
-                      </h3>
-                      <p className="text-sm text-surface-600">{faq.answer}</p>
-                    </div>
-                  </div>
-                </Card>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-
-        {/* Getting Started */}
-        <Card variant="elevated" padding="lg">
-          <CardHeader
-            title="Getting Started"
-            description="Quick steps to begin using the system"
-          />
-          <CardContent className="mt-4">
-            <ol className="space-y-4">
-              {[
-                {
-                  title: 'Upload Documents',
-                  description: 'Go to Upload page and select your PDF files',
-                },
-                {
-                  title: 'Configure Options',
-                  description: 'Choose schema, export format, and processing priority',
-                },
-                {
-                  title: 'Process & Monitor',
-                  description: 'Track processing status on the Tasks page',
-                },
-                {
-                  title: 'Export Results',
-                  description: 'Download extracted data in your preferred format',
-                },
-              ].map((step, index) => (
-                <li key={index} className="flex gap-4">
-                  <div className="flex items-center justify-center w-8 h-8 rounded-full bg-primary-100 text-primary-700 font-bold text-sm flex-shrink-0">
-                    {index + 1}
-                  </div>
-                  <div>
-                    <h4 className="font-semibold text-surface-900">{step.title}</h4>
-                    <p className="text-sm text-surface-600">{step.description}</p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          </CardContent>
-        </Card>
-
-        {/* Contact Support */}
-        <Card variant="outlined" padding="lg">
-          <CardHeader
-            title="Contact Support"
-            description="Need additional help? Reach out to our team"
-          />
-          <CardContent className="mt-4 space-y-3">
-            {contactOptions.map((option, index) => (
-              <div
-                key={index}
-                className="flex items-center justify-between p-4 bg-surface-50 rounded-xl"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-primary-100 flex items-center justify-center">
-                    {option.icon}
-                  </div>
-                  <div>
-                    <p className="font-medium text-surface-900">{option.title}</p>
-                    <p className="text-sm text-surface-500">{option.value}</p>
-                  </div>
-                </div>
-                <a
-                  href={option.action}
-                  target={option.action.startsWith('http') ? '_blank' : undefined}
-                  rel={
-                    option.action.startsWith('http')
-                      ? 'noopener noreferrer'
-                      : undefined
-                  }
-                  aria-label={`Open ${option.title}`}
-                  className="inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium rounded-lg border-2 border-primary-600 text-primary-600 hover:bg-primary-50 transition-colors"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </a>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-
-        {/* System Info */}
-        <Card variant="outlined" padding="lg">
-          <div className="flex items-start gap-4">
-            <AlertCircle className="w-5 h-5 text-info-600 flex-shrink-0 mt-0.5" />
-            <div>
-              <h3 className="font-semibold text-surface-900 mb-1">System Version</h3>
-              <p className="text-sm text-surface-600">
-                PDF Document Extraction System v1.0.0
-              </p>
-              <p className="text-sm text-surface-500 mt-1">
-                Backend API: v1.0.0 | Frontend: v1.0.0
-              </p>
+        {/* Doc sections */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {filtered.length === 0 ? (
+            <div className="lg:col-span-2 card p-10 text-center">
+              <Compass className="w-8 h-8 mx-auto text-text-muted mb-2" aria-hidden />
+              <p className="text-body text-text-secondary">No sections match “{query}”.</p>
             </div>
+          ) : (
+            filtered.map((section) => {
+              const Icon = section.icon;
+              return (
+                <div key={section.id} className="card p-5 flex flex-col">
+                  <div className="flex items-start gap-3">
+                    <span
+                      className="grid place-items-center w-9 h-9 rounded-lg text-accent-brand shrink-0"
+                      style={{ background: 'rgb(var(--accent-brand-rgb) / 0.12)' }}
+                    >
+                      <Icon className="w-4 h-4" aria-hidden />
+                    </span>
+                    <div className="min-w-0">
+                      <h2 className="text-h3 font-display font-semibold text-text-primary">{section.title}</h2>
+                      <p className="text-small text-text-muted mt-0.5">{section.summary}</p>
+                    </div>
+                  </div>
+                  <ul className="mt-3 space-y-1.5 flex-1">
+                    {section.bullets.map((b, i) => (
+                      <li key={i} className="text-body text-text-secondary flex gap-2">
+                        <span className="text-text-muted shrink-0">•</span>
+                        <span>{b}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {section.link && (
+                    <Link
+                      href={section.link.href}
+                      className="text-small text-accent-brand mt-4 inline-flex items-center gap-1 self-start"
+                    >
+                      {section.link.label} →
+                    </Link>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Keyboard shortcuts */}
+        <div className="card p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <Keyboard className="w-4 h-4 text-text-muted" aria-hidden />
+            <h2 className="text-h3 font-display font-semibold text-text-primary">Keyboard shortcuts</h2>
           </div>
-        </Card>
+          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3">
+            {SHORTCUTS.map((s, i) => (
+              <li key={i} className="flex items-center justify-between gap-4 text-body">
+                <span className="text-text-secondary">{s.description}</span>
+                <span className="inline-flex items-center gap-1 shrink-0">
+                  {s.keys.map((k, j) => (
+                    <Kbd key={j}>{k}</Kbd>
+                  ))}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="text-small text-text-muted mt-4 inline-flex items-center gap-1.5">
+            <Command className="w-3.5 h-3.5" aria-hidden />
+            Chords like <Kbd>g</Kbd> <Kbd>d</Kbd> are pressed in sequence, not held together.
+          </p>
+        </div>
+
+        <div className="card p-4 flex items-start gap-3">
+          <MousePointerClick className="w-5 h-5 text-accent-brand shrink-0 mt-0.5" aria-hidden />
+          <p className="text-small text-text-secondary">
+            Prefer clicking around? Every shortcut above has a visible button or link
+            equivalent — nothing in Veridoc is keyboard-only.
+          </p>
+        </div>
       </div>
     </AppLayout>
   );

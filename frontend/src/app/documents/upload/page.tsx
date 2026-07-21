@@ -1,329 +1,397 @@
 'use client';
 
-// useSearchParams() requires a Suspense boundary during static
-// generation; opting out of pre-render is the simplest fix for an
-// authenticated route that we never want to ship as a static page.
-export const dynamic = 'force-dynamic';
-
-import React, { useState, useCallback, useEffect, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { motion } from 'framer-motion';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useCallback, useState } from 'react';
+import Link from 'next/link';
+import { useMutation } from '@tanstack/react-query';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useDropzone, type FileRejection } from 'react-dropzone';
 import toast from 'react-hot-toast';
-import { Upload, ArrowRight, FileText, CheckCircle } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  FileText,
+  Info,
+  Loader2,
+  Upload as UploadIcon,
+  X,
+} from 'lucide-react';
 import { AppLayout } from '@/components/layout';
-import { FileUploader, UploadOptions } from '@/components/documents';
-import type { UploadFile } from '@/components/documents';
-import { Card, CardHeader, CardContent, Button, StepProgress } from '@/components/ui';
-import { documentsApi, schemaApi } from '@/lib/api';
-import { generateId } from '@/lib/utils';
-import type { ExportFormat, ExtractionMode, ProcessingPriority } from '@/types/api';
-import type { Modality } from '@/components/documents/UploadOptions';
-import { modeToProfileOverride, type ModeKey } from '@/lib/branding';
+import { ApiError, documentsApi } from '@/lib/api';
+import { cn, formatFileSize, generateId } from '@/lib/utils';
+import { MODE_LABELS, modeToProfileOverride, type ModeKey } from '@/lib/branding';
+import type { ExtractionMode } from '@/types/api';
 
-const UPLOAD_STEPS = [
-  { label: 'Select Files', description: 'Choose PDF documents' },
-  { label: 'Configure', description: 'Set processing options' },
-  { label: 'Process', description: 'Upload and process' },
-  { label: 'Complete', description: 'View results' },
+const fade = (delay = 0) => ({
+  initial: { opacity: 0, y: 12 },
+  animate: { opacity: 1, y: 0 },
+  transition: { duration: 0.35, delay, ease: [0.16, 1, 0.3, 1] as const },
+});
+
+const MAX_SIZE_BYTES = 100 * 1024 * 1024; // 100MB
+const MAX_FILES = 12;
+
+const ACCEPTED_TYPES: Record<string, string[]> = {
+  'application/pdf': ['.pdf'],
+  'image/png': ['.png'],
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/tiff': ['.tif', '.tiff'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+};
+
+const EXTRACTION_MODES: { value: ExtractionMode; label: string; hint: string }[] = [
+  { value: 'auto', label: 'Auto', hint: 'Let the analyzer decide single vs. multi-record.' },
+  { value: 'single', label: 'Single record', hint: 'One entity per document.' },
+  { value: 'multi', label: 'Multi record', hint: 'Separate distinct entities per row.' },
 ];
 
-export default function DocumentUploadPage() {
-  return (
-    <Suspense fallback={null}>
-      <DocumentUploadPageBody />
-    </Suspense>
-  );
+type QueuedStatus = 'queued' | 'uploading' | 'success' | 'error';
+
+interface QueuedFile {
+  id: string;
+  file: File;
+  status: QueuedStatus;
+  progress: number;
+  error?: string;
+  taskId?: string;
 }
 
-function DocumentUploadPageBody() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [currentStep, setCurrentStep] = useState(0);
-  const [files, setFiles] = useState<UploadFile[]>([]);
-  const [options, setOptions] = useState({
-    schemaName: '',
-    exportFormat: 'json' as ExportFormat,
-    priority: 'normal' as ProcessingPriority,
-    extractionMode: 'multi' as ExtractionMode,
-    maskPhi: false,
-    outputDir: './output',
-    // WS-3: empty list = auto-detect on the backend.
-    modalityOverride: [] as Modality[],
-    // WS-6: null = use server default; true = force redaction; false = bypass.
-    phiMode: null as boolean | null,
-    // Phase K — top-level mode chip; resolves to profile_override on the
-    // backend. ``auto`` preserves the analyzer's auto-detection.
-    mode: 'auto' as ModeKey,
-  });
+function statusIcon(status: QueuedStatus) {
+  switch (status) {
+    case 'uploading':
+      return <Loader2 className="w-4 h-4 animate-spin text-accent-brand" aria-hidden />;
+    case 'success':
+      return <CheckCircle2 className="w-4 h-4 conf-high" aria-hidden />;
+    case 'error':
+      return <AlertTriangle className="w-4 h-4 conf-low" aria-hidden />;
+    default:
+      return <FileText className="w-4 h-4 text-text-muted" aria-hidden />;
+  }
+}
 
-  // WS-4: pick up ?schema=NAME query param so the schemas gallery can
-  // deep-link "Use this schema" into a prefilled upload form.
-  useEffect(() => {
-    const fromQuery = searchParams?.get('schema');
-    if (fromQuery && fromQuery !== options.schemaName) {
-      setOptions((prev) => ({ ...prev, schemaName: fromQuery }));
-      toast.success(`Schema preselected: ${fromQuery}`, { id: 'schema-preselect' });
-    }
-    // Run once on mount; we don't want this to re-fire when the user
-    // manually changes the schema.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+export default function DocumentUploadPage() {
+  const [files, setFiles] = useState<QueuedFile[]>([]);
+  const [mode, setMode] = useState<ModeKey>('auto');
+  const [extractionMode, setExtractionMode] = useState<ExtractionMode>('auto');
+  const [maskPhi, setMaskPhi] = useState(false);
+
+  const onDrop = useCallback((accepted: File[], rejections: FileRejection[]) => {
+    rejections.forEach((r) => {
+      const code = r.errors[0]?.code;
+      const reason =
+        code === 'file-too-large'
+          ? `${r.file.name} exceeds ${formatFileSize(MAX_SIZE_BYTES)}`
+          : code === 'file-invalid-type'
+            ? `${r.file.name} isn't a supported file type`
+            : (r.errors[0]?.message ?? `${r.file.name} was rejected`);
+      toast.error(reason);
+    });
+
+    if (accepted.length === 0) return;
+
+    setFiles((prev) => [
+      ...prev,
+      ...accepted.map((file) => ({
+        id: generateId(),
+        file,
+        status: 'queued' as const,
+        progress: 0,
+      })),
+    ]);
   }, []);
 
-  // Fetch available schemas
-  const { data: schemas = [] } = useQuery({
-    queryKey: ['schemas'],
-    queryFn: () => schemaApi.list(),
+  const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
+    onDrop,
+    accept: ACCEPTED_TYPES,
+    maxSize: MAX_SIZE_BYTES,
+    maxFiles: MAX_FILES,
+    multiple: true,
   });
 
-  // Upload mutation
   const uploadMutation = useMutation({
-    mutationFn: async (file: UploadFile) => {
-      return documentsApi.upload(file.file, {
-        schema_name: options.schemaName || undefined,
-        export_format: options.exportFormat,
-        priority: options.priority,
-        mask_phi: options.maskPhi,
-        extraction_mode: options.extractionMode,
-        // WS-3 + WS-6: only send when caller has chosen something
-        // explicit. ``modality_override`` empty array = auto-detect;
-        // ``phi_mode`` null = server default.
-        modality_override:
-          options.modalityOverride.length > 0
-            ? options.modalityOverride
-            : undefined,
-        phi_mode: options.phiMode === null ? undefined : options.phiMode,
-        // Phase K — only send profile_override when the user picked a
-        // non-auto mode. ``auto`` leaves the analyzer free to detect.
-        profile_override: modeToProfileOverride(options.mode) ?? undefined,
-      });
+    mutationFn: async (qf: QueuedFile) => {
+      return documentsApi.upload(
+        qf.file,
+        {
+          mask_phi: maskPhi,
+          extraction_mode: extractionMode,
+          profile_override: modeToProfileOverride(mode) ?? undefined,
+        },
+        (progress) => {
+          setFiles((prev) => prev.map((f) => (f.id === qf.id ? { ...f, progress } : f)));
+        },
+      );
     },
-    onSuccess: (response, variables) => {
+    onSuccess: (response, qf) => {
       setFiles((prev) =>
         prev.map((f) =>
-          f.id === variables.id
-            ? { ...f, status: 'success', progress: 100, taskId: response.task_id }
-            : f
-        )
+          f.id === qf.id ? { ...f, status: 'success', progress: 100, taskId: response.task_id } : f,
+        ),
       );
-      toast.success(`${variables.file.name} uploaded successfully`);
+      toast.success(`${qf.file.name} queued for extraction`);
     },
-    onError: (error: Error, variables) => {
+    onError: (error: unknown, qf) => {
+      const message = error instanceof ApiError ? error.message : 'Upload failed';
       setFiles((prev) =>
-        prev.map((f) =>
-          f.id === variables.id
-            ? { ...f, status: 'error', error: error.message }
-            : f
-        )
+        prev.map((f) => (f.id === qf.id ? { ...f, status: 'error', error: message } : f)),
       );
-      toast.error(`Failed to upload ${variables.file.name}`);
+      toast.error(`${qf.file.name} failed to upload`);
     },
   });
 
-  const handleFilesSelected = useCallback((newFiles: File[]) => {
-    const uploadFiles: UploadFile[] = newFiles.map((file) => ({
-      id: generateId(),
-      file,
-      status: 'pending',
-      progress: 0,
-    }));
-    setFiles((prev) => [...prev, ...uploadFiles]);
-  }, []);
+  const removeFile = (id: string) => setFiles((prev) => prev.filter((f) => f.id !== id));
 
-  const handleFileRemove = useCallback((fileId: string) => {
-    setFiles((prev) => prev.filter((f) => f.id !== fileId));
-  }, []);
-
-  const handleUpload = async () => {
-    setCurrentStep(2);
-
-    // Track uploaded count for step progression
-    const pendingFiles = files.filter((f) => f.status === 'pending');
-    let successCount = files.filter((f) => f.status === 'success').length;
-    const totalFiles = files.length;
-
-    for (const file of pendingFiles) {
+  const handleSubmit = async () => {
+    const queued = files.filter((f) => f.status === 'queued' || f.status === 'error');
+    for (const qf of queued) {
       setFiles((prev) =>
         prev.map((f) =>
-          f.id === file.id ? { ...f, status: 'uploading', progress: 30 } : f
-        )
+          f.id === qf.id ? { ...f, status: 'uploading', progress: 0, error: undefined } : f,
+        ),
       );
-
       try {
-        await uploadMutation.mutateAsync(file);
-        successCount++;
+        await uploadMutation.mutateAsync(qf);
       } catch {
-        // Error is handled in onError callback
-        // Don't count as success
+        // handled in onError
       }
-    }
-
-    // Move to completion step only when ALL files have succeeded
-    // NOTE: This check uses tracked counts since React state is async
-    if (successCount === totalFiles && totalFiles > 0) {
-      setCurrentStep(3);
     }
   };
 
-  const canProceedToStep2 = files.length > 0 && files.some((f) => f.status === 'pending');
-  const canStartUpload = currentStep >= 1 && files.some((f) => f.status === 'pending');
   const isUploading = files.some((f) => f.status === 'uploading');
-  const allComplete = files.length > 0 && files.every((f) => f.status === 'success');
+  const canSubmit = files.some((f) => f.status === 'queued' || f.status === 'error') && !isUploading;
+  const anySucceeded = files.some((f) => f.status === 'success');
 
   return (
     <AppLayout>
-      <div className="max-w-4xl mx-auto space-y-6">
-        {/* Page Header */}
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-        >
-          <h1 className="text-2xl font-bold text-surface-900">Upload Documents</h1>
-          <p className="text-surface-500 mt-1">
-            Upload PDF documents for AI-powered field extraction
+      <div className="space-y-6">
+        <motion.div {...fade(0)}>
+          <p className="text-body text-text-secondary">
+            Drop in documents for dual-VLM extraction with provenance.
           </p>
         </motion.div>
 
-        {/* Progress Steps */}
-        <Card variant="elevated" padding="md">
-          <StepProgress steps={UPLOAD_STEPS} currentStep={currentStep} />
-        </Card>
-
-        {/* Step Content */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* File Upload Area */}
-          <div className="lg:col-span-2">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-            >
-              <Card variant="elevated" padding="md">
-                <CardHeader
-                  title="Select Documents"
-                  description="Upload PDF files for processing"
-                  action={
-                    files.length > 0 && (
-                      <span className="text-sm text-surface-500">
-                        {files.filter((f) => f.status === 'pending').length} pending
-                      </span>
-                    )
-                  }
-                />
-                <CardContent className="mt-4">
-                  <FileUploader
-                    onFilesSelected={handleFilesSelected}
-                    onFileRemove={handleFileRemove}
-                    files={files}
-                    maxFiles={10}
-                    disabled={isUploading || allComplete}
-                  />
-                </CardContent>
-              </Card>
-            </motion.div>
-          </div>
-
-          {/* Options Panel */}
-          <div>
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2 }}
-            >
-              <UploadOptions
-                options={options}
-                onChange={setOptions}
-                schemas={schemas}
-              />
-            </motion.div>
-          </div>
-        </div>
-
-        {/* Action Buttons */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-          className="flex items-center justify-between"
-        >
-          <Button
-            variant="secondary"
-            onClick={() => router.back()}
-            disabled={isUploading}
-          >
-            Cancel
-          </Button>
-
-          <div className="flex items-center gap-3">
-            {currentStep === 0 && (
-              <Button
-                variant="primary"
-                onClick={() => setCurrentStep(1)}
-                disabled={!canProceedToStep2}
-                rightIcon={<ArrowRight className="w-4 h-4" />}
+          {/* Dropzone + queue */}
+          <div className="lg:col-span-2 space-y-4">
+            <motion.div {...fade(0.03)}>
+              <div
+                {...getRootProps()}
+                className={cn(
+                  'glass-hairline rounded-2xl border-2 border-dashed p-10 flex flex-col items-center justify-center text-center cursor-pointer transition-colors duration-fast',
+                  isDragReject
+                    ? 'border-accent-danger'
+                    : isDragActive
+                      ? 'border-accent-brand'
+                      : 'border-border-default hover:border-border-strong',
+                )}
               >
-                Configure Options
-              </Button>
-            )}
-
-            {currentStep === 1 && (
-              <Button
-                variant="primary"
-                onClick={handleUpload}
-                disabled={!canStartUpload}
-                loading={isUploading}
-                leftIcon={<Upload className="w-4 h-4" />}
-              >
-                Start Processing
-              </Button>
-            )}
-
-            {currentStep === 2 && !allComplete && (
-              <Button variant="primary" disabled loading>
-                Processing...
-              </Button>
-            )}
-
-            {(currentStep === 3 || allComplete) && (
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2 text-success-600">
-                  <CheckCircle className="w-5 h-5" />
-                  <span className="text-sm font-medium">All files processed!</span>
-                </div>
-                <Button
-                  variant="primary"
-                  onClick={() => router.push('/tasks')}
-                  rightIcon={<ArrowRight className="w-4 h-4" />}
+                <input {...getInputProps()} />
+                <span
+                  className="grid place-items-center w-14 h-14 rounded-2xl text-accent-brand mb-4"
+                  style={{ background: 'rgb(var(--accent-brand-rgb) / 0.12)' }}
                 >
-                  View Tasks
-                </Button>
+                  <UploadIcon className="w-7 h-7" aria-hidden />
+                </span>
+                <p className="text-body text-text-primary font-medium">
+                  {isDragActive ? 'Drop to queue' : 'Drag & drop files here'}
+                </p>
+                <p className="mt-1 text-small text-text-muted">or click to browse</p>
+                <p className="mt-4 text-small text-text-muted">
+                  PDF · PNG · JPEG · TIFF · DOCX · XLSX — max {formatFileSize(MAX_SIZE_BYTES)} each
+                </p>
               </div>
+            </motion.div>
+
+            {files.length > 0 && (
+              <motion.div {...fade(0.06)} className="card overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-border-default">
+                  <h2 className="font-display text-h3 font-semibold text-text-primary">
+                    Queue ({files.length})
+                  </h2>
+                  {anySucceeded && (
+                    <Link href="/tasks" className="text-small text-accent-brand">
+                      View queue →
+                    </Link>
+                  )}
+                </div>
+                <ul className="divide-y divide-border-default max-h-[420px] overflow-y-auto no-scrollbar">
+                  <AnimatePresence initial={false}>
+                    {files.map((qf) => (
+                      <motion.li
+                        key={qf.id}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: 10 }}
+                        className="px-4 py-3"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span
+                            className="grid place-items-center w-9 h-9 rounded-xl flex-shrink-0"
+                            style={{ background: 'rgb(var(--text-primary-rgb) / 0.06)' }}
+                          >
+                            {statusIcon(qf.status)}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-body text-text-primary truncate">{qf.file.name}</p>
+                            <div className="flex items-center gap-2 text-small text-text-muted">
+                              <span>{formatFileSize(qf.file.size)}</span>
+                              {qf.status === 'error' && qf.error && (
+                                <>
+                                  <span aria-hidden>·</span>
+                                  <span className="conf-low truncate">{qf.error}</span>
+                                </>
+                              )}
+                              {qf.status === 'success' && qf.taskId && (
+                                <>
+                                  <span aria-hidden>·</span>
+                                  <span className="font-mono truncate">
+                                    task {qf.taskId.slice(0, 8)}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                            {qf.status === 'uploading' && (
+                              <div
+                                className="mt-2 h-1.5 rounded-full overflow-hidden"
+                                style={{ background: 'rgb(var(--text-primary-rgb) / 0.08)' }}
+                              >
+                                <div
+                                  className="h-full rounded-full bg-accent-brand transition-all duration-300"
+                                  style={{ width: `${qf.progress}%` }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                          {(qf.status === 'queued' || qf.status === 'error') && (
+                            <button
+                              onClick={() => removeFile(qf.id)}
+                              className="btn-ghost p-1.5 flex-shrink-0"
+                              aria-label={`Remove ${qf.file.name}`}
+                            >
+                              <X className="w-4 h-4" aria-hidden />
+                            </button>
+                          )}
+                        </div>
+                      </motion.li>
+                    ))}
+                  </AnimatePresence>
+                </ul>
+              </motion.div>
             )}
           </div>
-        </motion.div>
 
-        {/* Info Box */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.4 }}
-          className="bg-info-50 border border-info-200 rounded-xl p-4"
-        >
-          <div className="flex gap-3">
-            <FileText className="w-5 h-5 text-info-600 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-medium text-info-800">
-                Processing Information
-              </p>
-              <ul className="mt-2 text-sm text-info-700 space-y-1">
-                <li>• Documents are processed asynchronously in the background</li>
-                <li>• You can track progress in the Task Queue</li>
-                <li>• Results will be available once processing completes</li>
-                <li>• HIPAA-compliant processing with optional PHI masking</li>
-              </ul>
+          {/* Options panel */}
+          <motion.div {...fade(0.08)} className="space-y-4">
+            <div className="card p-5 space-y-3">
+              <h2 className="font-display text-h3 font-semibold text-text-primary">Profile</h2>
+              <div className="flex flex-wrap gap-2">
+                {(Object.keys(MODE_LABELS) as ModeKey[]).map((key) => {
+                  const cfg = MODE_LABELS[key];
+                  const active = mode === key;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setMode(key)}
+                      aria-pressed={active}
+                      className={cn('btn-secondary text-small px-3 py-1.5', active && 'text-accent-brand')}
+                      style={
+                        active
+                          ? {
+                              background: 'rgb(var(--accent-brand-rgb) / 0.12)',
+                              borderColor: 'rgb(var(--accent-brand-rgb) / 0.4)',
+                            }
+                          : undefined
+                      }
+                    >
+                      <span aria-hidden>{cfg.icon}</span>
+                      {cfg.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-small text-text-muted">{MODE_LABELS[mode].description}</p>
             </div>
-          </div>
-        </motion.div>
+
+            <div className="card p-5 space-y-3">
+              <h2 className="font-display text-h3 font-semibold text-text-primary">Extraction mode</h2>
+              <div className="flex flex-wrap gap-2">
+                {EXTRACTION_MODES.map((em) => {
+                  const active = extractionMode === em.value;
+                  return (
+                    <button
+                      key={em.value}
+                      type="button"
+                      onClick={() => setExtractionMode(em.value)}
+                      aria-pressed={active}
+                      title={em.hint}
+                      className={cn('btn-secondary text-small px-3 py-1.5', active && 'text-accent-brand')}
+                      style={
+                        active
+                          ? {
+                              background: 'rgb(var(--accent-brand-rgb) / 0.12)',
+                              borderColor: 'rgb(var(--accent-brand-rgb) / 0.4)',
+                            }
+                          : undefined
+                      }
+                    >
+                      {em.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div
+              className="rounded-2xl p-4 flex gap-2.5 glass-hairline"
+              style={{ background: 'rgb(var(--accent-brand-rgb) / 0.06)' }}
+            >
+              <Info className="w-4 h-4 flex-shrink-0 text-accent-brand mt-0.5" aria-hidden />
+              <p className="text-small text-text-secondary">
+                Modality (printed, handwritten, table, form, fax, visual) is auto-detected per page —
+                there&apos;s no manual override here yet. The analyzer picks the extraction strategy
+                that fits each document.
+              </p>
+            </div>
+
+            <div className="card p-4 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-body text-text-primary font-medium">Mask PHI in exports</p>
+                <p className="text-small text-text-muted">Redacts names, SSNs, emails, phone numbers.</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={maskPhi}
+                onClick={() => setMaskPhi((v) => !v)}
+                className="relative w-11 h-6 rounded-full flex-shrink-0 transition-colors duration-fast"
+                style={{
+                  background: maskPhi
+                    ? 'rgb(var(--accent-brand-rgb))'
+                    : 'rgb(var(--text-primary-rgb) / 0.15)',
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-fast"
+                  style={{ transform: maskPhi ? 'translateX(20px)' : 'translateX(0)' }}
+                />
+              </button>
+            </div>
+
+            <button
+              onClick={handleSubmit}
+              disabled={!canSubmit}
+              className="btn-primary w-full justify-center"
+            >
+              {isUploading ? (
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
+              ) : (
+                <UploadIcon className="w-4 h-4" aria-hidden />
+              )}
+              {isUploading ? 'Uploading…' : 'Start extraction'}
+            </button>
+          </motion.div>
+        </div>
       </div>
     </AppLayout>
   );

@@ -1,270 +1,367 @@
 'use client';
 
-import React, { useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
-import { useQuery } from '@tanstack/react-query';
-import { motion } from 'framer-motion';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { AnimatePresence, motion } from 'framer-motion';
+import toast from 'react-hot-toast';
 import {
-  FileText,
-  Upload,
-  Search,
+  Database,
+  FileSignature,
   Filter,
-  Download,
-  Eye,
-  MoreVertical,
-  Clock,
-  CheckCircle,
-  AlertTriangle,
+  GitCompare,
+  Package,
+  RefreshCw,
+  RotateCcw,
+  ShieldOff,
+  Upload,
 } from 'lucide-react';
 import { AppLayout } from '@/components/layout';
-import {
-  Card,
-  Button,
-  Input,
-  StatusBadge,
-  ConfidenceBadge,
-  Dropdown,
-  NoDocumentsState,
-  Skeleton,
-} from '@/components/ui';
 import { documentsApi } from '@/lib/api';
-import { formatDuration, truncate } from '@/lib/utils';
-import type { ProcessResponse } from '@/types/api';
+import { cn, formatConfidence, formatDuration } from '@/lib/utils';
+import { MODE_LABELS, type ModeKey } from '@/lib/branding';
+import type { ConfidenceLevel, ProcessResponse, TaskStatus } from '@/types/api';
+
+const fade = (delay = 0) => ({
+  initial: { opacity: 0, y: 12 },
+  animate: { opacity: 1, y: 0 },
+  transition: { duration: 0.35, delay, ease: [0.16, 1, 0.3, 1] as const },
+});
+
+const STATUS_OPTIONS: TaskStatus[] = [
+  'pending',
+  'started',
+  'processing',
+  'validating',
+  'exporting',
+  'completed',
+  'failed',
+  'retrying',
+  'cancelled',
+];
+
+const CONFIDENCE_OPTIONS: ConfidenceLevel[] = ['high', 'medium', 'low'];
+
+function confChipClass(confidence: number) {
+  if (confidence >= 0.85) return 'conf-chip-high';
+  if (confidence >= 0.5) return 'conf-chip-med';
+  return 'conf-chip-low';
+}
+
+function statusBadgeClass(status: string) {
+  const s = status.toLowerCase();
+  if (s === 'completed') return 'badge-success';
+  if (s === 'failed' || s === 'cancelled') return 'badge-error';
+  if (s === 'retrying') return 'badge-warning';
+  if (s === 'pending') return 'badge-info';
+  return 'badge-primary';
+}
+
+function getStringField(obj: Record<string, unknown> | undefined, key: string): string | undefined {
+  const v = obj ? obj[key] : undefined;
+  return typeof v === 'string' ? v : undefined;
+}
+
+function docFilename(doc: ProcessResponse): string {
+  return (
+    getStringField(doc.data, 'filename') ??
+    getStringField(doc.data, 'file_name') ??
+    doc.output_path?.split(/[\\/]/).pop() ??
+    doc.processing_id
+  );
+}
+
+function docProfile(doc: ProcessResponse): string {
+  return getStringField(doc.data, 'profile') ?? getStringField(doc.data, 'schema_name') ?? '—';
+}
+
+function docType(doc: ProcessResponse): string {
+  return getStringField(doc.data, 'document_type') ?? '—';
+}
 
 export default function DocumentsPage() {
-  const [searchQuery, setSearchQuery] = useState('');
+  const qc = useQueryClient();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [profileFilter, setProfileFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [confidenceFilter, setConfidenceFilter] = useState('');
 
-  const { data: documents, isLoading } = useQuery({
+  const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['documents', 'recent'],
     queryFn: () => documentsApi.listRecent(),
   });
 
-  const filteredDocuments = documents?.filter((doc) =>
-    doc.processing_id.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const documents = data ?? [];
+  const filtered = documents.filter((doc) => {
+    if (statusFilter && doc.status !== statusFilter) return false;
+    if (confidenceFilter && doc.confidence_level !== confidenceFilter) return false;
+    if (profileFilter && docProfile(doc) !== profileFilter) return false;
+    return true;
+  });
 
-  const handleExport = async (doc: ProcessResponse, format: 'json' | 'excel' | 'markdown') => {
-    try {
-      const blob = await documentsApi.export(doc.processing_id, format);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${doc.processing_id}.${format === 'excel' ? 'xlsx' : format}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Export failed:', error);
-    }
+  const reextractMutation = useMutation({
+    mutationFn: (ids: string[]) => Promise.all(ids.map((id) => documentsApi.reprocess(id))),
+    onSuccess: () => {
+      toast.success('Re-extraction queued');
+      setSelected(new Set());
+      qc.invalidateQueries({ queryKey: ['documents'] });
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+    },
+    onError: () => toast.error('Failed to queue re-extraction'),
+  });
+
+  const allSelected = filtered.length > 0 && filtered.every((d) => selected.has(d.processing_id));
+
+  const toggleAll = () => {
+    setSelected(allSelected ? new Set() : new Set(filtered.map((d) => d.processing_id)));
   };
+
+  const toggleOne = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const comingSoon = (label: string) => toast(`${label} isn't wired up yet — coming soon.`, { icon: '🚧' });
 
   return (
     <AppLayout>
       <div className="space-y-6">
-        {/* Page Header */}
+        {/* Subheader */}
         <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4"
+          {...fade(0)}
+          className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
         >
-          <div>
-            <h1 className="text-2xl font-bold text-surface-900">Documents</h1>
-            <p className="text-surface-500 mt-1">
-              View and manage processed documents
-            </p>
+          <p className="text-body text-text-secondary">
+            Extracted documents, their confidence, and where they stand.
+          </p>
+          <div className="flex items-center gap-2">
+            <button onClick={() => refetch()} className="btn-secondary text-small px-3 py-1.5">
+              <RefreshCw className={cn('w-4 h-4', isFetching && 'animate-spin')} aria-hidden />
+              Refresh
+            </button>
+            <Link href="/documents/upload" className="btn-primary text-small px-3 py-1.5">
+              <Upload className="w-4 h-4" aria-hidden />
+              Upload
+            </Link>
           </div>
-          <Link href="/documents/upload">
-            <Button variant="primary" leftIcon={<Upload className="w-4 h-4" />}>
-              Upload New
-            </Button>
-          </Link>
         </motion.div>
 
-        {/* Search and Filter */}
-        <Card variant="elevated" padding="md">
-          <div className="flex flex-col sm:flex-row gap-4">
-            <div className="flex-1">
-              <Input
-                placeholder="Search by ID..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                leftIcon={<Search className="w-4 h-4" />}
-              />
-            </div>
-            <Button variant="secondary" leftIcon={<Filter className="w-4 h-4" />}>
-              Filters
-            </Button>
-          </div>
-        </Card>
-
-        {/* Documents List */}
-        <Card variant="elevated" padding="none">
-          {isLoading ? (
-            <div className="p-6 space-y-4">
-              {[...Array(5)].map((_, i) => (
-                <div key={i} className="flex items-center gap-4 p-4 border rounded-xl">
-                  <Skeleton variant="rectangular" width="3rem" height="3rem" />
-                  <div className="flex-1 space-y-2">
-                    <Skeleton width="60%" />
-                    <Skeleton width="40%" height="0.75rem" />
-                  </div>
-                  <Skeleton width="5rem" />
-                </div>
-              ))}
-            </div>
-          ) : filteredDocuments?.length === 0 ? (
-            <div className="p-8">
-              <NoDocumentsState
-                onUpload={() => window.location.href = '/documents/upload'}
-              />
-            </div>
-          ) : (
-            <div className="divide-y divide-surface-100">
-              {/* Table Header */}
-              <div className="hidden md:grid grid-cols-12 gap-4 px-6 py-3 bg-surface-50 text-xs font-medium text-surface-500 uppercase tracking-wider">
-                <div className="col-span-4">Document</div>
-                <div className="col-span-2">Status</div>
-                <div className="col-span-2">Confidence</div>
-                <div className="col-span-2">Processed</div>
-                <div className="col-span-2 text-right">Actions</div>
-              </div>
-
-              {/* Document Rows */}
-              {filteredDocuments?.map((doc, index) => (
-                <motion.div
-                  key={doc.processing_id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.03 }}
-                  className="grid grid-cols-1 md:grid-cols-12 gap-4 px-6 py-4 hover:bg-surface-50 transition-colors"
-                >
-                  {/* Document Info */}
-                  <div className="col-span-4 flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-primary-100 flex items-center justify-center flex-shrink-0">
-                      <FileText className="w-6 h-6 text-primary-600" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-surface-900 truncate">
-                        {truncate(doc.processing_id, 20)}
-                      </p>
-                      <p className="text-xs text-surface-500">
-                        {doc.metadata?.fields_extracted || 0} fields extracted
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Status */}
-                  <div className="col-span-2 flex items-center">
-                    <StatusBadge status={doc.status} />
-                  </div>
-
-                  {/* Confidence */}
-                  <div className="col-span-2 flex items-center">
-                    <ConfidenceBadge
-                      level={doc.confidence_level}
-                      value={doc.overall_confidence}
-                    />
-                  </div>
-
-                  {/* Processed Time */}
-                  <div className="col-span-2 flex items-center">
-                    <div className="text-sm text-surface-600">
-                      {doc.metadata?.processing_time_ms
-                        ? formatDuration(doc.metadata.processing_time_ms)
-                        : 'N/A'}
-                    </div>
-                  </div>
-
-                  {/* Actions */}
-                  <div className="col-span-2 flex items-center justify-end gap-2">
-                    <Link href={`/documents/${doc.processing_id}`}>
-                      <Button variant="ghost" size="icon">
-                        <Eye className="w-4 h-4" />
-                      </Button>
-                    </Link>
-                    <Dropdown
-                      align="right"
-                      trigger={
-                        <Button variant="ghost" size="icon">
-                          <MoreVertical className="w-4 h-4" />
-                        </Button>
-                      }
-                      items={[
-                        {
-                          label: 'View Details',
-                          icon: <Eye className="w-4 h-4" />,
-                          onClick: () =>
-                            (window.location.href = `/documents/${doc.processing_id}`),
-                        },
-                        {
-                          label: 'Export JSON',
-                          icon: <Download className="w-4 h-4" />,
-                          onClick: () => handleExport(doc, 'json'),
-                        },
-                        {
-                          label: 'Export Excel',
-                          icon: <Download className="w-4 h-4" />,
-                          onClick: () => handleExport(doc, 'excel'),
-                        },
-                        { divider: true, label: '' },
-                        {
-                          label: 'Reprocess',
-                          icon: <Clock className="w-4 h-4" />,
-                          onClick: () => {},
-                        },
-                      ]}
-                    />
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        {/* Stats Summary */}
-        {documents && documents.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.3 }}
-            className="grid grid-cols-1 sm:grid-cols-3 gap-4"
+        {/* Filters row */}
+        <motion.div {...fade(0.03)} className="card p-4 flex flex-wrap items-center gap-3">
+          <span className="inline-flex items-center gap-1.5 text-small text-text-muted">
+            <Filter className="w-3.5 h-3.5" aria-hidden />
+            Filters
+          </span>
+          <select
+            aria-label="Filter by profile"
+            className="input w-auto py-1.5 text-small"
+            value={profileFilter}
+            onChange={(e) => setProfileFilter(e.target.value)}
           >
-            <Card variant="default" padding="md" className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-success-100 flex items-center justify-center">
-                <CheckCircle className="w-5 h-5 text-success-600" />
+            <option value="">All profiles</option>
+            {(Object.keys(MODE_LABELS) as ModeKey[]).map((key) => (
+              <option key={key} value={MODE_LABELS[key].label}>
+                {MODE_LABELS[key].label}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Filter by status"
+            className="input w-auto py-1.5 text-small"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+          >
+            <option value="">All statuses</option>
+            {STATUS_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Filter by confidence"
+            className="input w-auto py-1.5 text-small"
+            value={confidenceFilter}
+            onChange={(e) => setConfidenceFilter(e.target.value)}
+          >
+            <option value="">All confidence</option>
+            {CONFIDENCE_OPTIONS.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          <span className="ml-auto text-small text-text-muted">
+            {filtered.length} document{filtered.length === 1 ? '' : 's'}
+          </span>
+        </motion.div>
+
+        {/* Bulk action toolbar */}
+        <AnimatePresence>
+          {selected.size > 0 && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="card p-3 flex flex-wrap items-center gap-2 overflow-hidden"
+              style={{ borderColor: 'rgb(var(--accent-brand-rgb) / 0.35)' }}
+            >
+              <span className="text-small text-text-secondary px-1">
+                {selected.size} selected
+              </span>
+              <div className="ml-auto flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => reextractMutation.mutate(Array.from(selected))}
+                  disabled={reextractMutation.isPending}
+                  className="btn-secondary text-small px-3 py-1.5"
+                >
+                  <RotateCcw
+                    className={cn('w-4 h-4', reextractMutation.isPending && 'animate-spin')}
+                    aria-hidden
+                  />
+                  Re-extract
+                </button>
+                <button
+                  onClick={() => comingSoon('Mask PHI')}
+                  className="btn-secondary text-small px-3 py-1.5"
+                >
+                  <ShieldOff className="w-4 h-4" aria-hidden />
+                  Mask PHI
+                </button>
+                <button
+                  onClick={() => comingSoon('Bundle')}
+                  className="btn-secondary text-small px-3 py-1.5"
+                >
+                  <Package className="w-4 h-4" aria-hidden />
+                  Bundle
+                </button>
+                <button
+                  onClick={() => comingSoon('Sign receipt')}
+                  className="btn-secondary text-small px-3 py-1.5"
+                >
+                  <FileSignature className="w-4 h-4" aria-hidden />
+                  Sign receipt
+                </button>
+                <button
+                  onClick={() => comingSoon('Compare')}
+                  className="btn-secondary text-small px-3 py-1.5"
+                >
+                  <GitCompare className="w-4 h-4" aria-hidden />
+                  Compare
+                </button>
               </div>
-              <div>
-                <p className="text-2xl font-bold text-surface-900">
-                  {documents.filter((d) => d.status === 'completed').length}
-                </p>
-                <p className="text-sm text-surface-500">Completed</p>
-              </div>
-            </Card>
-            <Card variant="default" padding="md" className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-warning-100 flex items-center justify-center">
-                <AlertTriangle className="w-5 h-5 text-warning-600" />
-              </div>
-              <div>
-                <p className="text-2xl font-bold text-surface-900">
-                  {documents.filter((d) => d.requires_human_review).length}
-                </p>
-                <p className="text-sm text-surface-500">Need Review</p>
-              </div>
-            </Card>
-            <Card variant="default" padding="md" className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-primary-100 flex items-center justify-center">
-                <FileText className="w-5 h-5 text-primary-600" />
-              </div>
-              <div>
-                <p className="text-2xl font-bold text-surface-900">
-                  {documents.length}
-                </p>
-                <p className="text-sm text-surface-500">Total Documents</p>
-              </div>
-            </Card>
-          </motion.div>
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Table */}
+        <motion.div {...fade(0.06)} className="card overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-border-default text-small text-text-muted uppercase tracking-wide">
+                  <th className="w-10 px-4 py-3">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all documents"
+                      checked={allSelected}
+                      onChange={toggleAll}
+                      disabled={filtered.length === 0}
+                      className="rounded"
+                    />
+                  </th>
+                  <th className="px-4 py-3 font-medium">Filename</th>
+                  <th className="px-4 py-3 font-medium">Profile</th>
+                  <th className="px-4 py-3 font-medium">Doc type</th>
+                  <th className="px-4 py-3 font-medium">Confidence</th>
+                  <th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {isLoading ? (
+                  Array.from({ length: 4 }).map((_, i) => (
+                    <tr key={i} className="border-b border-border-default last:border-0">
+                      <td className="px-4 py-3" colSpan={7}>
+                        <div className="skeleton h-5 w-full" />
+                      </td>
+                    </tr>
+                  ))
+                ) : filtered.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-14">
+                      <div className="flex flex-col items-center text-center gap-3">
+                        <span
+                          className="grid place-items-center w-12 h-12 rounded-xl text-accent-brand"
+                          style={{ background: 'rgb(var(--accent-brand-rgb) / 0.12)' }}
+                        >
+                          <Database className="w-6 h-6" aria-hidden />
+                        </span>
+                        <div>
+                          <p className="text-body text-text-primary font-medium">
+                            No documents endpoint wired yet — GET /documents (coming soon)
+                          </p>
+                          <p className="mt-1 text-small text-text-muted max-w-md">
+                            Upload a document to kick off an extraction, then track its progress from
+                            Tasks. Once it lands here, this table will list every processed document.
+                          </p>
+                        </div>
+                        <Link href="/documents/upload" className="btn-secondary text-small px-3 py-1.5 mt-1">
+                          <Upload className="w-4 h-4" aria-hidden />
+                          Upload a document
+                        </Link>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  filtered.map((doc) => (
+                    <tr
+                      key={doc.processing_id}
+                      className="border-b border-border-default last:border-0 hover:bg-white/5 transition-colors"
+                    >
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${docFilename(doc)}`}
+                          checked={selected.has(doc.processing_id)}
+                          onChange={() => toggleOne(doc.processing_id)}
+                          className="rounded"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <Link
+                          href={`/documents/${doc.processing_id}`}
+                          className="text-body text-text-primary hover:text-accent-brand transition-colors truncate"
+                        >
+                          {docFilename(doc)}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3 text-body text-text-secondary">{docProfile(doc)}</td>
+                      <td className="px-4 py-3 text-body text-text-secondary">{docType(doc)}</td>
+                      <td className="px-4 py-3">
+                        <span className={confChipClass(doc.overall_confidence)}>
+                          {formatConfidence(doc.overall_confidence)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={statusBadgeClass(doc.status)}>{doc.status}</span>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-small text-text-secondary tabular-nums">
+                        {doc.metadata?.processing_time_ms
+                          ? formatDuration(doc.metadata.processing_time_ms)
+                          : '—'}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </motion.div>
       </div>
     </AppLayout>
   );

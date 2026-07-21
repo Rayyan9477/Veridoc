@@ -1,0 +1,80 @@
+# Veridoc — Alibaba Cloud ECS deployment stack.
+#   redis    — Celery broker + result backend + queue metrics
+#   api      — FastAPI (verification society over Qwen Cloud)
+#   worker   — Celery worker that runs the extraction pipeline
+#   frontend — Next.js Glass UI (proxies /api -> api service)
+#
+# Usage (on the ECS box, from repo root):
+#   cp deploy/alibaba/.env.example deploy/alibaba/.env   # then fill in secrets
+#   docker compose -f deploy/alibaba/docker-compose.yml up -d --build
+#
+# Open security-group ports 3000 (UI) and 8000 (API) to your IP.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/alibaba/Dockerfile.api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - veridoc-data:/app/data
+      - veridoc-logs:/app/logs
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/alibaba/Dockerfile.api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "src.queue.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    volumes:
+      - veridoc-data:/app/data
+      - veridoc-logs:/app/logs
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deploy/alibaba/Dockerfile.frontend
+    restart: unless-stopped
+    environment:
+      - API_PROXY_TARGET=http://api:8000
+      - NEXT_PUBLIC_API_URL=/api
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  redis-data:
+  veridoc-data:
+  veridoc-logs:

@@ -1,0 +1,34 @@
+# Veridoc API + Celery worker — FastAPI + LangGraph verification society.
+# One image serves both the API (uvicorn) and the worker (celery); the
+# docker-compose file picks the command per service.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
+
+# System libs: PyMuPDF / OpenCV image processing + poppler for PDF rendering.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libgl1 \
+        libglib2.0-0 \
+        poppler-utils \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+COPY . .
+
+# Artifacts (results, calibration, memory, audit) live on a mounted volume.
+RUN mkdir -p /app/data /app/logs
+
+EXPOSE 8000
+
+# Secrets/config are injected at runtime via docker-compose `env_file` — never
+# baked into the image. Override CMD for the worker service in compose.
+CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
