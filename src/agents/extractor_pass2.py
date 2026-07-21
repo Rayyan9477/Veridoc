@@ -256,18 +256,85 @@ class ExtractorPass2Agent(BaseAgent):
             )
         return []
 
-    @staticmethod
-    def _normalise_payload(payload: dict[str, Any]) -> dict[str, Any]:
-        """Reject ``(value=null, bbox=[...])`` pairs — bbox hallucination.
+    # Keys that identify a value-bearing AUDITOR record, used to detect a
+    # response whose field records sit at the top level instead of under
+    # ``fields``. ``location`` is deliberately excluded — too generic.
+    _RECORD_KEYS = frozenset({"value", "bbox", "confidence"})
 
-        AUDITOR system prompt instructs the model to emit ``null`` for
-        both ``value`` and ``bbox`` together. When the model breaks
-        that rule, the bbox is unreliable; we drop it server-side so
-        the reconciler doesn't trust hallucinated coordinates.
+    @classmethod
+    def _unwrap_fields(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return the field mapping, tolerating a missing ``fields`` wrapper.
+
+        Qwen3-VL routinely ignores the envelope and emits records at the
+        top level (``{"vendor_name": {...}, "vendor_address": {...}}``).
+        Reading ``payload["fields"]`` then yields ``{}`` and every bbox is
+        silently dropped, which empties Source View. Detect that shape and
+        treat the payload itself as the field mapping.
+        """
+        fields = payload.get("fields")
+        if isinstance(fields, dict) and fields:
+            return fields
+        candidates = {
+            name: record
+            for name, record in payload.items()
+            if isinstance(record, dict) and cls._RECORD_KEYS & record.keys()
+        }
+        return candidates if candidates else (fields if isinstance(fields, dict) else {})
+
+    @staticmethod
+    def _coerce_bbox(bbox: Any) -> list[float] | None:
+        """Coerce a model's bbox into normalised ``[x1, y1, x2, y2]``.
+
+        Accepts the contracted list form and the ``{"x","y","w","h"}`` dict
+        form that Qwen3-VL emits instead. The dict form is inconsistent about
+        whether ``w``/``h`` mean extent or far-edge, so interpret per axis:
+        a value already beyond the origin is a far-edge, otherwise it is an
+        extent. Returns ``None`` when the result isn't a usable in-page box.
+        """
+        if bbox is None:
+            return None
+        if isinstance(bbox, dict):
+            try:
+                x1 = float(bbox["x"])
+                y1 = float(bbox["y"])
+                raw_w = float(bbox["w"])
+                raw_h = float(bbox["h"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            x2 = raw_w if raw_w > x1 else x1 + raw_w
+            y2 = raw_h if raw_h > y1 else y1 + raw_h
+            coords = [x1, y1, x2, y2]
+        elif isinstance(bbox, (list, tuple)):
+            if len(bbox) != 4:
+                return None
+            try:
+                coords = [float(c) for c in bbox]
+            except (TypeError, ValueError):
+                return None
+        else:
+            return None
+
+        # Some models (notably qwen-vl-max) answer in pixels despite the
+        # prompt. Anything outside [0, 1] cannot be normalised without the
+        # page dimensions, so drop it rather than draw a wrong box.
+        if any(c < 0.0 or c > 1.0 for c in coords):
+            return None
+        if coords[2] <= coords[0] or coords[3] <= coords[1]:
+            return None
+        return coords
+
+    @classmethod
+    def _normalise_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        """Normalise the AUDITOR payload to the envelope the reconciler reads.
+
+        Three jobs: recover field records the model left un-wrapped, coerce
+        each bbox to ``[x1, y1, x2, y2]``, and reject ``(value=null,
+        bbox=[...])`` pairs — the AUDITOR prompt says to null both together,
+        so a bbox without a value is a hallucinated coordinate.
         """
         if not isinstance(payload, dict):
             return {"fields": {}}
-        fields = payload.get("fields", {})
+        fields = cls._unwrap_fields(payload)
         if not isinstance(fields, dict):
             return payload
         cleaned: dict[str, Any] = {}
@@ -276,12 +343,13 @@ class ExtractorPass2Agent(BaseAgent):
                 cleaned[name] = record
                 continue
             value = record.get("value")
-            bbox = record.get("bbox")
-            if value is None and bbox is not None:
+            if value is None:
                 # Fix invariant violation; preserve the rest of the record.
-                record = {**record, "bbox": None}
-            cleaned[name] = record
-        out = dict(payload)
+                bbox: list[float] | None = None
+            else:
+                bbox = cls._coerce_bbox(record.get("bbox"))
+            cleaned[name] = {**record, "bbox": bbox}
+        out = {k: v for k, v in payload.items() if k not in cleaned}
         out["fields"] = cleaned
         return out
 

@@ -3,11 +3,11 @@ requires = ["setuptools>=70.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "doc-extraction-system"
+name = "veridoc"
 version = "2.0.0"
-description = "HIPAA-compliant local agentic medical document extraction system"
+description = "Veridoc — the verification layer for document AI: a society of models that cross-examine every field."
 readme = "README.md"
-license = {text = "Proprietary"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [
     {name = "Rayyan Ahmed"}
@@ -15,7 +15,7 @@ authors = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Healthcare Industry",
-    "License :: Other/Proprietary License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -163,12 +163,12 @@ vlm-server = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/rayyanahmed/doc-extraction-system"
-"Bug Tracker" = "https://github.com/rayyanahmed/doc-extraction-system/issues"
-"Documentation" = "https://github.com/rayyanahmed/doc-extraction-system/docs"
+"Homepage" = "https://github.com/rayyanahmed/veridoc"
+"Bug Tracker" = "https://github.com/rayyanahmed/veridoc/issues"
+"Documentation" = "https://github.com/rayyanahmed/veridoc/docs"
 
 [project.scripts]
-doc-extract = "src.cli:main"
+veridoc = "src.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -830,7 +830,6 @@ async def batch_process_documents(
 
 @router.get(
     "/documents/{processing_id}",
-    response_model=ProcessResponse,
     summary="Get processing result",
     description="Retrieve the result of a previous processing request.",
 )
@@ -845,20 +844,27 @@ async def get_processing_result(
         ),
     ],
     http_request: Request,
-) -> ProcessResponse:
+) -> dict[str, Any]:
     """
     Get the result of a previous processing request.
+
+    Reads the same ``ResultStore`` that ``GET /documents`` lists from, so a
+    document that appears in the list is openable. (This used to be a stub
+    that always 404'd, which meant every document detail page — and with it
+    Source View's bbox provenance — failed to load.)
 
     Args:
         processing_id: Unique processing ID (validated format).
         http_request: HTTP request object.
 
     Returns:
-        Processing result.
+        The full stored extraction record.
 
     Raises:
         HTTPException: If processing ID not found or invalid format.
     """
+    from src.storage.result_store import get_result_store
+
     request_id = getattr(http_request.state, "request_id", "")
 
     # SECURITY: Additional validation for processing_id format
@@ -874,12 +880,13 @@ async def get_processing_result(
         processing_id=processing_id,
     )
 
-    # This would typically retrieve from a database
-    # For now, return a not found error
-    raise HTTPException(
-        status_code=404,
-        detail=f"Processing result not found: {processing_id}",
-    )
+    record = get_result_store().get(processing_id)
+    if not isinstance(record, dict):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Processing result not found: {processing_id}",
+        )
+    return record
 
 
 @router.post(
@@ -1005,6 +1012,39 @@ async def generate_preview(
     )
 
 
+def _render_pdf_page_png(
+    pdf_path: Any,
+    page_number: int,
+    dpi: int = 150,
+) -> bytes | None:
+    """Render one page of a PDF to PNG bytes, or ``None`` if unavailable.
+
+    Used as the fallback for documents whose in-process checkpoint is gone
+    (e.g. processed by a Celery worker). Returns ``None`` rather than raising
+    so the caller decides the status code.
+    """
+    if not isinstance(pdf_path, str) or not pdf_path:
+        return None
+    path = Path(pdf_path)
+    if not path.is_file():
+        return None
+    try:
+        import fitz  # PyMuPDF
+
+        with fitz.open(path) as doc:
+            if not 1 <= page_number <= doc.page_count:
+                return None
+            return doc[page_number - 1].get_pixmap(dpi=dpi).tobytes("png")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "page_render_failed",
+            pdf_path=str(path),
+            page_number=page_number,
+            error=str(exc),
+        )
+        return None
+
+
 @router.get(
     "/documents/{processing_id}/pages/{page_number}",
     summary="Get raw page image (V3 Phase 4)",
@@ -1050,18 +1090,28 @@ async def get_document_page_image(
         raise HTTPException(status_code=400, detail="Invalid processing ID format")
 
     orch = getattr(http_request.app.state, "orchestrator", None)
-    if orch is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Document state retrieval not available in this deployment",
-        )
+    state = orch.get_checkpoint_state(processing_id) if orch is not None else None
 
-    state = orch.get_checkpoint_state(processing_id)
     if state is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Document not found: {processing_id}",
-        )
+        # Worker-processed documents aren't checkpointed in this process, and
+        # ``page_images`` is deliberately not persisted (it would bloat every
+        # stored record with base64 PNGs). Re-render the page from the source
+        # PDF instead — otherwise Source View has no page to draw boxes on.
+        from src.storage.result_store import get_result_store
+
+        stored = get_result_store().get(processing_id)
+        if not isinstance(stored, dict):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document not found: {processing_id}",
+            )
+        rendered = _render_pdf_page_png(stored.get("pdf_path"), page_number)
+        if rendered is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Page {page_number} not available for document {processing_id}",
+            )
+        return Response(content=rendered, media_type="image/png")
 
     page_images = state.get("page_images", []) or []
     target_page = next(
@@ -1154,14 +1204,24 @@ async def get_document_provenance(
     if not re.match(r"^[a-zA-Z0-9\-_]{16,64}$", processing_id):
         raise HTTPException(status_code=400, detail="Invalid processing ID format")
 
+    # Prefer live checkpoint state, but fall back to the persisted result.
+    # Documents processed by a Celery worker are checkpointed in *that*
+    # process, so with the in-memory checkpointer the API sees nothing —
+    # which 404'd every provenance lookup and left Source View with no
+    # boxes to draw. The stored record carries the same
+    # ``merged_extraction_v2``, so read it from there.
+    state: dict[str, Any] | None = None
     orch = getattr(http_request.app.state, "orchestrator", None)
-    if orch is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Document state retrieval not available in this deployment",
-        )
+    if orch is not None:
+        state = orch.get_checkpoint_state(processing_id)
 
-    state = orch.get_checkpoint_state(processing_id)
+    if state is None:
+        from src.storage.result_store import get_result_store
+
+        stored = get_result_store().get(processing_id)
+        if isinstance(stored, dict):
+            state = stored
+
     if state is None:
         raise HTTPException(
             status_code=404,

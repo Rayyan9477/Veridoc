@@ -1,16 +1,18 @@
 # Veridoc
 
-**State-of-the-art document intelligence with bbox-grounded provenance, HIPAA-grade auditability, and air-gap deployability.**
+**The verification layer for document AI — a society of models that cross-examine every field, ground each value to the pixel, and ship calibrated confidence.**
 
 ![License Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-success?style=flat-square)
 ![Tests 2853 passing](https://img.shields.io/badge/Tests-2853%20passing-16a34a?style=flat-square)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-1e40af?style=flat-square)
 ![LangGraph v3](https://img.shields.io/badge/LangGraph-v3-7c3aed?style=flat-square)
-![Dual%E2%80%91VLM](https://img.shields.io/badge/Architecture-Dual--VLM%20%2B%20Critic-0891b2?style=flat-square)
-![100%25 Local](https://img.shields.io/badge/Inference-100%25%20Local-059669?style=flat-square)
+![Verification Society](https://img.shields.io/badge/Architecture-Verification%20Society-0891b2?style=flat-square)
+![Qwen Cloud or on-prem](https://img.shields.io/badge/Deploy-Qwen%20Cloud%20or%20on--prem-059669?style=flat-square)
 ![HIPAA Ready](https://img.shields.io/badge/HIPAA-Ready-16a34a?style=flat-square)
 
-> **Veridoc turns any unstructured PDF, scan, or photo into a validated, schema-bound JSON extraction with per-field provenance back to source pixels.** Generic-first, with a Medical-RCM profile that emits FHIR R4 / C-CDA. On-prem-first; cloud-capable. Apache 2.0.
+> **Veridoc turns any unstructured PDF, scan, or photo into a validated, schema-bound JSON extraction with per-field provenance back to source pixels.** Every other extractor hands you JSON from a single model and asks you to trust it. Veridoc runs a *society* of models — an Extractor and an Auditor read independently, a Reconciler arbitrates, and a Critic breaks ties — **each on a different model** — so every value is cross-examined, pixel-grounded, and calibrated. Generic-first (invoices, contracts, forms, financial docs), with optional profiles (finance, legal, insurance, medical-RCM/FHIR, logistics). Deployment-flexible: **Qwen Cloud or fully on-prem**. Apache 2.0.
+
+> ✅ **Validated live on Qwen Cloud.** The full society ran end-to-end against Alibaba Model Studio and extracted **21 correct fields** from a real invoice — **pass 1 on `qwen3-vl-plus`, pass 2 on `qwen-vl-max`, Critic on `qwen-vl-plus`** — three distinct models cross-examining, with per-field provenance and calibrated confidence emitted. Deployment proof: [`src/client/backends/qwen_cloud_backend.py`](src/client/backends/qwen_cloud_backend.py) · full write-up: [`docs/SUBMISSION.md`](docs/SUBMISSION.md) · interactive architecture: [`docs/architecture/veridoc-architecture.html`](docs/architecture/veridoc-architecture.html).
 
 ---
 
@@ -46,20 +48,46 @@ flowchart LR
 
 | Capability | Landing AI ADE | Pulse | Reducto | Docling / Marker | **Veridoc** |
 |---|---|---|---|---|---|
+| **Multi-agent verification society** (models cross-examine every field) | no | no | no | no | **yes — Extractor ‖ Auditor → Reconciler → Critic, each a different model** |
 | Per-field bbox provenance | partial | partial | partial | no | **yes, threaded end-to-end** |
-| Dual-VLM with Critic verification | no | no | no | no | **yes** |
+| Heterogeneous dual read + Critic verification | no | no | no | no | **yes** |
 | Constrained JSON-schema decoding | proprietary | proprietary | proprietary | no | **open + verifiable** |
 | Calibrated confidence (Platt / isotonic) | no | no | no | no | **yes, per-(profile, tenant)** |
 | FHIR R4 / C-CDA emission | no | no | no | no | **yes** |
 | HMAC-signed export receipts | no | no | no | no | **yes** |
 | Tamper-evident audit chain | no | no | no | no | **yes, with sidecar anchor** |
-| 100 % air-gap deployable | no | no | no | partial | **yes** |
+| Deployment-flexible (Qwen Cloud **or** air-gap) | no | no | no | partial | **yes** |
 | License | proprietary | proprietary | proprietary | open | **Apache 2.0** |
-| Healthcare-grade profile | bolt-on | no | no | no | **first-class** |
+| Domain profiles (finance · legal · insurance · medical · logistics) | bolt-on | no | no | no | **first-class, pluggable** |
 
 The closed extractors stop at JSON. The open parsers stop at Markdown. Neither tier handles the inputs that actually matter — handwritten superbills, faxed claims, low-DPI scans, stamps, marks, multi-region forms — and neither emits standards-grade structured output a clinical or financial system can ingest unmodified.
 
-**Veridoc is the only system in this space that combines bbox-grounded provenance, dual-VLM reconciliation, calibrated confidence, HIPAA-grade auditability, and air-gap deployability under an open licence.**
+**Veridoc is the only system in this space where a *society* of models cross-examines every field — bbox-grounded, calibrated, schema-verified, and audit-chained — under an open licence, deployable on Qwen Cloud or fully on-prem.**
+
+---
+
+## How it fits together
+
+```mermaid
+flowchart TB
+    UI[Glass UI - Next.js: Dashboard, Source View click-to-bbox, HITL, Schema Designer, Admin] --> API[FastAPI /api/v1]
+    API --> SOCIETY
+    subgraph SOCIETY["Verification Society - LangGraph StateGraph"]
+        UND[Understand: Analyzer, Splitter, Layout, Tables, Schema]
+        EX[Extractor Pass-1: Qwen A] --> AU[Auditor Pass-2 + bboxes: Qwen B] --> REC[Reconciler: 5-step] --> CR[Critic: Qwen C] --> TR[Validator + live Calibrator]
+        UND --> EX
+    end
+    TR --> OUT[schema JSON / FHIR / signed receipt + pixel provenance + audit chain]
+    SOCIETY -. OpenAI-compatible .-> QWEN[(Qwen Cloud Model Studio: 1 endpoint, 3 models)]
+    OUT --> OSS[(Alibaba OSS)]
+    HARNESS[Experiment/Eval harness: ExperimentConfig, golden sets, injection catch-rate, ECE/Brier] -. drives .-> SOCIETY
+    LEARN[Learning loops: HITL/golden to calibration.fit + correction memory] -. feeds .-> SOCIETY
+```
+
+A single OpenAI-compatible **Qwen Cloud** endpoint serves three models — the Extractor, the Auditor,
+and the Critic each bind to a distinct one, so the society is genuinely heterogeneous. An
+experiment/eval harness and live learning loops (HITL + golden sets → calibration refit + correction
+memory) sit alongside the pipeline, so accuracy and calibration are *measured and improved*, not assumed.
 
 ---
 
@@ -69,8 +97,15 @@ The closed extractors stop at JSON. The open parsers stop at Markdown. Neither t
 # 1. Install
 pip install -e ".[dev]"
 
-# 2. Start a local VLM (LM Studio at http://localhost:1234 with any vision model)
-#    Veridoc is model-agnostic — operator picks via VLM_BACKEND and *_MODEL settings.
+# 2. Point Veridoc at a model backend (model-agnostic via VLM_BACKEND):
+#    a) Qwen Cloud (recommended) — one endpoint, a distinct Qwen model per society role:
+#       export VLM_BACKEND=qwen_cloud
+#       export VLM_QWEN_CLOUD_PRIMARY_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+#       export VLM_QWEN_CLOUD_API_KEY=sk-...                      # Model Studio key
+#       export VLM_QWEN_CLOUD_PRIMARY_MODEL=qwen-vl-max           # Extractor
+#       export VLM_QWEN_CLOUD_SECONDARY_MODEL=qwen2.5-vl-72b-instruct  # Auditor
+#       export VLM_QWEN_CLOUD_CRITIC_MODEL=qwen-vl-plus           # Critic
+#    b) Local — any OpenAI-compatible vision model via LM Studio at http://localhost:1234
 
 # 3. Extract — generic profile (any PDF)
 python main.py extract path/to/contract.pdf -o output/
@@ -149,7 +184,7 @@ The whole pipeline is a **LangGraph v3 state machine** with durable SQLite check
 
 ## Six core differentiators
 
-### 1. Heterogeneous dual-VLM with reconciler
+### 1. A society of models — heterogeneous read, reconciler, and critic
 
 ```mermaid
 %% Pass 1 and Pass 2 run in different prompt frames; the reconciler arbitrates.
@@ -176,7 +211,7 @@ flowchart LR
     class OUT shipped
 ```
 
-Two passes with different prompt frames produce orthogonal failure modes. The reconciler arbitrates field-by-field with a documented 5-step tiebreaker. Per-(profile, modality) reconciler weights mean fax-mode handwritten claims get different tiebreakers than clean printed invoices.
+Two passes with different prompt frames — **and, on Qwen Cloud, different models** (Extractor, Auditor, and Critic each bind to a distinct Qwen model) — produce orthogonal failure modes. The reconciler arbitrates field-by-field with a documented 5-step tiebreaker; the Critic breaks ties from an independent verifier frame. Per-(profile, modality) reconciler weights mean fax-mode handwritten inputs get different tiebreakers than clean printed invoices.
 
 ### 2. Bbox-grounded click-to-source provenance
 
@@ -357,14 +392,14 @@ flowchart LR
 | Surface | What's there |
 |---|---|
 | **Agents** | Orchestrator (LangGraph) · Analyzer · Splitter · TableDetector · Extractor (Pass 1 / Pass 2) · Reconciler · Critic · Validator |
-| **Backend protocol** | `VLMBackend` interface — operator picks any vision model via config; LM Studio adapter ships in-tree |
+| **Backend protocol** | `VLMBackend` interface — operator picks any vision model via config; **Qwen Cloud** (Model Studio, role→model) + LM Studio / vLLM / Gemma adapters ship in-tree |
 | **Profiles** | `generic-document` (any PDF) · `medical-rcm` (CMS-1500/UB-04/EOB/Superbill) · `finance` (invoices, W-2, 1099); legal-contract / insurance-form / logistics scaffolded |
 | **Validation** | Pydantic schemas · 18 hallucination patterns · CPT/ICD/NPI/POS validators · cross-field rules · Critic agent · `ConfidenceCalibrator` (Platt + isotonic + linear) |
 | **Memory** | FAISS vector store, per-tenant isolation, context retrieval into prompts |
 | **Exports** | JSON (4 styles) · Excel (4-sheet) · Markdown (4 styles) · **FHIR R4 Bundle** · bbox overlay PNGs · signed receipt |
 | **Security** | RBAC (7 roles) · JWT with revocation · AES-256-GCM at rest · PHI redaction (ML + regex) · audit chain with sidecar anchor · SSRF webhook guards |
 | **Observability** | Arize Phoenix (OpenInference / OTel) · PostHog · structlog · Prometheus · per-stage span attributes |
-| **Frontend** | Next.js 14 App Router + React 18 + TypeScript 5 + Tailwind 3.4 + Zustand + TanStack Query + react-pdf · dark mode · Source View with click-to-bbox · WCAG-pass a11y |
+| **Frontend** | Next.js 14 App Router + React 18 + TypeScript 5 + Tailwind + Zustand + TanStack Query · "Glass" UI (glassmorphism, light/dark, ⌘K palette) · Source View with click-to-bbox · WCAG-pass a11y |
 | **Tests** | 2853 passing — unit, integration, security, e2e, accuracy splits |
 
 ---
@@ -506,24 +541,23 @@ Full file-by-file footprint lives in [docs/VERIDOC_MASTER_PLAN.md §H](docs/VERI
 
 | Doc | What's inside |
 |---|---|
-| [docs/README.md](docs/README.md) | Documentation index + reading order |
-| [docs/VERIDOC_MASTER_PLAN.md](docs/VERIDOC_MASTER_PLAN.md) | Canonical product reference — architecture, phases, appendices |
-| [docs/STATUS.md](docs/STATUS.md) | Shipping reality at the latest merge |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | **Design of record** — the Verification Society, Qwen Cloud model layer, deployment topology |
+| [docs/QWEN_HACKATHON_EXECUTION.md](docs/QWEN_HACKATHON_EXECUTION.md) | Qwen Cloud integration + Alibaba (ECS + OSS) deployment plan |
 | [docs/MODES.md](docs/MODES.md) | Modality / profile detection deep-dive |
 | [docs/PHI_MODE.md](docs/PHI_MODE.md) | Opt-in PHI redaction operator guide |
 | [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Phoenix · PostHog · audit-chain ops |
 | [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) | One-page product summary for evaluators |
-| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | 90-second demo walkthrough storyboard |
+| [docs/archive/](docs/archive/) | Superseded direction docs (AWS Bedrock, Google/Gemini) — history only |
 
 ---
 
 ## Working set
 
 - **Backend:** Python 3.11+, FastAPI, LangGraph v3, LangChain 1.x, Pydantic 2.x, openai-compatible VLM client, FAISS, openpyxl, PyMuPDF, OpenCV
-- **Frontend:** Next.js 14 App Router, React 18, TypeScript 5, Tailwind 3.4, Zustand, TanStack Query, axios, Lucide, Framer Motion, react-pdf (opt-in)
-- **Inference:** any OpenAI-compatible vision model via LM Studio (model-agnostic by design)
+- **Frontend:** Next.js 14 App Router, React 18, TypeScript 5, Tailwind, Zustand, TanStack Query, Lucide, Framer Motion — "Glass" glassmorphism UI
+- **Inference:** Qwen Cloud / Alibaba Model Studio (OpenAI-compatible), or any local OpenAI-compatible vision model via LM Studio — model-agnostic by design
 - **Observability:** Arize Phoenix (OpenInference), PostHog, structlog, Prometheus
-- **Storage:** SQLite (LangGraph checkpoints), FAISS (vector memory), append-only audit-log JSONL
+- **Storage:** SQLite (LangGraph checkpoints), FAISS (vector memory), append-only audit-log JSONL, Alibaba OSS (artifact store)
 - **Queue:** Celery + Redis (optional — sync mode works without)
 
 ---
@@ -546,4 +580,4 @@ PRs that touch the pipeline core also need to pass the nightly hallucination-inj
 
 ---
 
-*State-of-the-art document intelligence. Open. Local. Auditable.*
+*The verification layer for document AI. Open. Trustworthy. Deployment-flexible.*

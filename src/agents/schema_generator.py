@@ -211,7 +211,11 @@ class SchemaGeneratorAgent(BaseAgent):
                 schema=JSONObjectEnvelope,
                 system_prompt=system_prompt,
                 temperature=0.2,  # Slightly higher for creative schema generation
-                max_tokens=5000,  # Schema generation needs detailed response
+                # A field-rich document (invoice with line items) generates a
+                # schema well past 5k tokens; the response was being truncated
+                # mid-JSON, which failed parsing and burned all three retries
+                # before falling back to a low-confidence generic schema.
+                max_tokens=12000,
             )
             return payload
 

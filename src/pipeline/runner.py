@@ -91,7 +91,7 @@ class PipelineRunner:
         self,
         client: LMStudioClient | None = None,
         enable_checkpointing: bool = True,
-        max_retries: int = 2,
+        max_retries: int | None = None,
         dpi: int = 200,
         max_image_dimension: int = 2048,
         enable_image_enhancement: bool | None = None,
@@ -102,7 +102,10 @@ class PipelineRunner:
         Args:
             client: Optional pre-configured LM Studio client.
             enable_checkpointing: Whether to enable state checkpointing.
-            max_retries: Maximum retry attempts for extraction.
+            max_retries: Maximum retry attempts for extraction. Defaults to
+                ``settings.extraction.max_retries`` — this used to be a hard
+                -coded 2, which silently ignored the configured value and
+                could re-run the whole society twice.
             dpi: DPI for PDF to image conversion.
             max_image_dimension: Maximum image dimension for VLM.
             enable_image_enhancement: Whether to apply image enhancement
@@ -111,10 +114,14 @@ class PipelineRunner:
         """
         self._client = client if client is not None else _resolve_backend_client()
         self._enable_checkpointing = enable_checkpointing
-        self._max_retries = max_retries
+        self._settings = get_settings()
+        self._max_retries = (
+            max_retries
+            if max_retries is not None
+            else getattr(getattr(self._settings, "extraction", None), "max_retries", 2)
+        )
         self._dpi = dpi
         self._max_image_dimension = max_image_dimension
-        self._settings = get_settings()
         self._logger = get_logger("pipeline.runner")
 
         # Image enhancement (optional, improves scanned/faxed doc quality)
@@ -132,7 +139,7 @@ class PipelineRunner:
         self._logger.info(
             "pipeline_runner_initialized",
             checkpointing=enable_checkpointing,
-            max_retries=max_retries,
+            max_retries=self._max_retries,
             dpi=dpi,
             image_enhancement=self._enable_enhancement,
         )

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PDF Document Extraction System - Unified Entry Point
+Veridoc - Unified Entry Point
 
 Runs the web application (FastAPI + Next.js), CLI extraction,
 batch processing, and configuration management from a single file.
@@ -628,7 +628,7 @@ class ProcessManager:
 
             # Print access information
             log(f"{Color.BOLD}{'='*50}{Color.RESET}")
-            log(f"{Color.BOLD}PDF Document Extraction System is running!{Color.RESET}")
+            log(f"{Color.BOLD}Veridoc is running!{Color.RESET}")
             log(f"{Color.BOLD}{'='*50}{Color.RESET}")
             if run_backend:
                 log(f"  Backend API:    {Color.CYAN}http://localhost:8000{Color.RESET}")
@@ -1146,7 +1146,7 @@ async def run_web_server(args: argparse.Namespace) -> int:
 def main() -> int:
     """Unified main entry point with CLI and web server support."""
     parser = argparse.ArgumentParser(
-        description="PDF Document Extraction System",
+        description="Veridoc - the verification layer for document AI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1259,7 +1259,7 @@ Examples:
 
     # Print banner
     print(f"\n{Color.BOLD}{Color.BLUE}{'='*60}{Color.RESET}")
-    print(f"{Color.BOLD}{Color.BLUE}  PDF Document Extraction System{Color.RESET}")
+    print(f"{Color.BOLD}{Color.BLUE}  Veridoc{Color.RESET}")
     print(f"{Color.BOLD}{Color.BLUE}  Universal Multi-Record Extraction with VLM{Color.RESET}")
     print(f"{Color.BOLD}{Color.BLUE}{'='*60}{Color.RESET}\n")
 
