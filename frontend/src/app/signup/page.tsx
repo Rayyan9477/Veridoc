@@ -1,244 +1,141 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
-import { FileText, Mail, Lock, User, ArrowRight } from 'lucide-react';
-import { Card, CardContent, Button, Input } from '@/components/ui';
+import { ArrowRight, Lock, Mail, User } from 'lucide-react';
 import { authApi } from '@/lib/api';
+import { BRANDING } from '@/lib/branding';
 
-// DEV MODE: Skip signup. R1.3 (P0) — gated on NODE_ENV + opt-in env
-// var so production builds never compile the bypass. Matches the gate
-// in ``src/components/auth/ProtectedRoute.tsx``.
 const DEV_AUTO_LOGIN =
   process.env.NODE_ENV !== 'production' &&
   process.env.NEXT_PUBLIC_DEV_AUTO_LOGIN === 'true';
+
+type FormKey = 'username' | 'email' | 'password' | 'confirmPassword';
 
 export default function SignupPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
 
-  // DEV MODE: Redirect to dashboard immediately
   useEffect(() => {
-    if (DEV_AUTO_LOGIN) {
-      router.replace('/dashboard');
-    }
+    if (DEV_AUTO_LOGIN) router.replace('/dashboard');
   }, [router]);
-  const [formData, setFormData] = useState({
+
+  const [form, setForm] = useState<Record<FormKey, string>>({
     username: '',
     email: '',
     password: '',
     confirmPassword: '',
   });
-  const [errors, setErrors] = useState({
+  const [errors, setErrors] = useState<Record<FormKey, string>>({
     username: '',
     email: '',
     password: '',
     confirmPassword: '',
   });
 
-  const validateForm = () => {
-    const newErrors = {
-      username: '',
-      email: '',
-      password: '',
-      confirmPassword: '',
-    };
-    let isValid = true;
-
-    if (!formData.username) {
-      newErrors.username = 'Username is required';
-      isValid = false;
-    } else if (formData.username.length < 3) {
-      newErrors.username = 'Username must be at least 3 characters';
-      isValid = false;
-    }
-
-    if (!formData.email) {
-      newErrors.email = 'Email is required';
-      isValid = false;
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
-      newErrors.email = 'Invalid email format';
-      isValid = false;
-    }
-
-    if (!formData.password) {
-      newErrors.password = 'Password is required';
-      isValid = false;
-    } else if (formData.password.length < 12) {
-      newErrors.password = 'Password must be at least 12 characters';
-      isValid = false;
-    }
-
-    if (!formData.confirmPassword) {
-      newErrors.confirmPassword = 'Please confirm your password';
-      isValid = false;
-    } else if (formData.password !== formData.confirmPassword) {
-      newErrors.confirmPassword = 'Passwords do not match';
-      isValid = false;
-    }
-
-    setErrors(newErrors);
-    return isValid;
+  const set = (k: FormKey, v: string) => {
+    setForm((f) => ({ ...f, [k]: v }));
+    if (errors[k]) setErrors((e) => ({ ...e, [k]: '' }));
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const validate = () => {
+    const e: Record<FormKey, string> = { username: '', email: '', password: '', confirmPassword: '' };
+    if (form.username.length < 3) e.username = 'At least 3 characters.';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) e.email = 'Enter a valid email.';
+    if (form.password.length < 12) e.password = 'At least 12 characters.';
+    if (form.confirmPassword !== form.password) e.confirmPassword = 'Passwords do not match.';
+    setErrors(e);
+    return !Object.values(e).some(Boolean);
+  };
 
-    if (!validateForm()) return;
-
+  const submit = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    if (!validate()) return;
     setLoading(true);
-
     try {
-      // Use centralized API client for consistent error handling and configuration
       await authApi.signup({
-        username: formData.username,
-        email: formData.email,
-        password: formData.password,
-        confirm_password: formData.confirmPassword,
+        username: form.username,
+        email: form.email,
+        password: form.password,
+        confirm_password: form.confirmPassword,
       });
-
-      toast.success('Account created successfully! Please login.');
+      toast.success('Account created — please sign in.');
       router.push('/login');
-    } catch (error: unknown) {
-      console.error('Signup error:', error);
-      const message = error instanceof Error ? error.message : 'Failed to create account';
-      toast.error(message);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create account');
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-primary-600 via-primary-700 to-primary-900 flex items-center justify-center p-4">
-      {/* Background Pattern */}
-      <div className="absolute inset-0 overflow-hidden">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-white/10 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-white/10 rounded-full blur-3xl" />
-      </div>
+  const fields: { key: FormKey; label: string; type?: string; icon: React.ComponentType<{ className?: string }>; placeholder: string; autoComplete: string }[] = [
+    { key: 'username', label: 'USERNAME', icon: User, placeholder: 'jane.operator', autoComplete: 'username' },
+    { key: 'email', label: 'EMAIL', type: 'email', icon: Mail, placeholder: 'jane@acme.example.com', autoComplete: 'email' },
+    { key: 'password', label: 'PASSWORD', type: 'password', icon: Lock, placeholder: '••••••••••••', autoComplete: 'new-password' },
+    { key: 'confirmPassword', label: 'CONFIRM PASSWORD', type: 'password', icon: Lock, placeholder: '••••••••••••', autoComplete: 'new-password' },
+  ];
 
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4">
       <motion.div
-        initial={{ opacity: 0, y: 20 }}
+        initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="relative w-full max-w-md"
+        transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+        className="w-full max-w-md"
       >
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-white/20 backdrop-blur-lg mb-4">
-            <FileText className="w-8 h-8 text-white" />
-          </div>
-          <h1 className="text-2xl font-bold text-white">PDF Document Extraction</h1>
-          <p className="text-white/70 mt-2">Create your account</p>
+        <div className="flex flex-col items-center mb-6">
+          <span className="grid place-items-center w-12 h-12 rounded-2xl glass-panel mb-3">
+            <span className="font-display text-xl font-semibold text-accent-brand">V</span>
+          </span>
+          <h1 className="font-display text-h1 font-semibold text-text-primary">Create account</h1>
+          <p className="text-body text-text-secondary mt-1">Provision a new operator account.</p>
         </div>
 
-        {/* Signup Card */}
-        <Card variant="elevated" padding="lg" className="backdrop-blur-xl bg-white/95">
-          <CardContent>
-            <form onSubmit={handleSubmit} className="space-y-5">
-              <Input
-                label="Username"
-                type="text"
-                value={formData.username}
-                onChange={(e) =>
-                  setFormData({ ...formData, username: e.target.value })
-                }
-                error={errors.username}
-                placeholder="Choose a username"
-                leftIcon={<User className="w-4 h-4" />}
-                autoComplete="username"
-              />
-
-              <Input
-                label="Email"
-                type="email"
-                value={formData.email}
-                onChange={(e) =>
-                  setFormData({ ...formData, email: e.target.value })
-                }
-                error={errors.email}
-                placeholder="Enter your email"
-                leftIcon={<Mail className="w-4 h-4" />}
-                autoComplete="email"
-              />
-
-              <div>
-                <Input
-                  label="Password"
-                  type="password"
-                  value={formData.password}
-                  onChange={(e) =>
-                    setFormData({ ...formData, password: e.target.value })
-                  }
-                  error={errors.password}
-                  placeholder="Create a password"
-                  leftIcon={<Lock className="w-4 h-4" />}
-                  autoComplete="new-password"
-                />
-                <p className="mt-1 text-xs text-surface-500">
-                  Must be 12+ characters with uppercase, lowercase, number, and special character. No sequential or repeated characters.
-                </p>
-              </div>
-
-              <Input
-                label="Confirm Password"
-                type="password"
-                value={formData.confirmPassword}
-                onChange={(e) =>
-                  setFormData({ ...formData, confirmPassword: e.target.value })
-                }
-                error={errors.confirmPassword}
-                placeholder="Confirm your password"
-                leftIcon={<Lock className="w-4 h-4" />}
-                autoComplete="new-password"
-              />
-
-              <div className="flex items-start gap-2">
+        <form onSubmit={submit} className="glass-panel p-6 space-y-4">
+          {fields.map(({ key, label, type, icon: Icon, placeholder, autoComplete }) => (
+            <div key={key}>
+              <label htmlFor={key} className="block text-small text-text-muted mb-1.5 tracking-wide">
+                {label}
+              </label>
+              <div className="relative">
+                <Icon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" aria-hidden />
                 <input
-                  type="checkbox"
-                  className="w-4 h-4 mt-1 rounded border-surface-300 text-primary-600 focus:ring-primary-500"
-                  required
+                  id={key}
+                  type={type ?? 'text'}
+                  className={errors[key] ? 'input-error pl-9' : 'input pl-9'}
+                  placeholder={placeholder}
+                  autoComplete={autoComplete}
+                  value={form[key]}
+                  onChange={(e) => set(key, e.target.value)}
                 />
-                <span className="text-sm text-surface-600">
-                  I agree to the{' '}
-                  <Link
-                    href="/terms"
-                    className="text-primary-600 hover:text-primary-700 font-medium"
-                  >
-                    Terms of Service
-                  </Link>{' '}
-                  and{' '}
-                  <Link
-                    href="/privacy"
-                    className="text-primary-600 hover:text-primary-700 font-medium"
-                  >
-                    Privacy Policy
-                  </Link>
-                </span>
               </div>
+              {key === 'password' && !errors.password && (
+                <p className="mt-1 text-small text-text-muted">Strong · 12+ chars, mixed case, numbers.</p>
+              )}
+              {errors[key] && <p className="mt-1 text-small conf-low">{errors[key]}</p>}
+            </div>
+          ))}
 
-              <Button
-                type="submit"
-                variant="primary"
-                size="lg"
-                className="w-full"
-                loading={loading}
-                rightIcon={<ArrowRight className="w-4 h-4" />}
-              >
-                Create Account
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
+          <button type="submit" disabled={loading} className="btn-primary w-full">
+            {loading ? 'Creating…' : (
+              <>
+                Create account <ArrowRight className="w-4 h-4" aria-hidden />
+              </>
+            )}
+          </button>
+        </form>
 
-        {/* Footer */}
-        <p className="text-center text-white/70 text-sm mt-6">
+        <p className="text-center text-small text-text-muted mt-5">
           Already have an account?{' '}
-          <Link href="/login" className="text-white font-medium hover:underline">
+          <Link href="/login" className="text-accent-brand">
             Sign in
           </Link>
+        </p>
+        <p className="text-center text-[0.65rem] font-mono text-text-muted mt-6">
+          {BRANDING.productName} {BRANDING.versionLabel} · build a3f1c
         </p>
       </motion.div>
     </div>

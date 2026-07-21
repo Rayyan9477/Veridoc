@@ -1,466 +1,412 @@
 'use client';
 
-import React, { useState } from 'react';
-import { motion } from 'framer-motion';
-import toast from 'react-hot-toast';
+/**
+ * Settings — Display tab is fully built (theme, density, default landing
+ * tab, timezone, date format); the rest are labeled placeholders since
+ * there's no settings-persistence endpoint yet. Everything here is
+ * either wired to the real theme mechanism (`useTheme`) or persisted to
+ * `localStorage` only — never claimed as "saved to server".
+ */
+
+import { useEffect, useState, type ComponentType, type ReactNode } from 'react';
 import {
+  Blocks,
+  Building2,
+  Check,
+  LayoutPanelLeft,
+  Monitor,
+  Moon,
+  Palette,
+  Settings as SettingsIcon,
+  Sun,
   User,
-  Shield,
-  Bell,
-  Server,
-  Key,
-  Save,
+  Wrench,
 } from 'lucide-react';
 import { AppLayout } from '@/components/layout';
-import {
-  Card,
-  Button,
-  Input,
-  Select,
-  Tabs,
-  TabsList,
-  TabsTrigger,
-  TabsContent,
-} from '@/components/ui';
-import type { SelectOption } from '@/components/ui';
+import { useAuth } from '@/hooks/useAuth';
+import { useTheme, type ThemeChoice } from '@/components/ThemeProvider';
+import { cn } from '@/lib/utils';
+import { NAV_GROUPS } from '@/components/layout/nav-config';
+
+type SettingsTab = 'profile' | 'display' | 'notifications' | 'integrations' | 'tenant' | 'advanced';
+
+const TABS: { id: SettingsTab; label: string; icon: ComponentType<{ className?: string }> }[] = [
+  { id: 'profile', label: 'Profile', icon: User },
+  { id: 'display', label: 'Display', icon: Palette },
+  { id: 'notifications', label: 'Notifications', icon: SettingsIcon },
+  { id: 'integrations', label: 'API & Integrations', icon: Blocks },
+  { id: 'tenant', label: 'Tenant', icon: Building2 },
+  { id: 'advanced', label: 'Advanced', icon: Wrench },
+];
+
+type Density = 'comfortable' | 'compact';
+type DateFormat = 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD' | 'MMM D, YYYY';
+
+const LANDING_TAB_OPTIONS = NAV_GROUPS.flatMap((g) => g.items).filter((item) =>
+  ['/dashboard', '/documents', '/tasks', '/schemas', '/security'].includes(item.href),
+);
+
+const TIMEZONE_OPTIONS = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'Europe/London',
+  'Europe/Berlin',
+  'Asia/Karachi',
+  'Asia/Kolkata',
+  'Asia/Dubai',
+  'Asia/Singapore',
+  'Australia/Sydney',
+];
+
+const DATE_FORMAT_OPTIONS: DateFormat[] = ['MM/DD/YYYY', 'DD/MM/YYYY', 'YYYY-MM-DD', 'MMM D, YYYY'];
+
+function formatWithPattern(date: Date, pattern: DateFormat): string {
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const monthShort = date.toLocaleDateString('en-US', { month: 'short' });
+  switch (pattern) {
+    case 'MM/DD/YYYY':
+      return `${mm}/${dd}/${yyyy}`;
+    case 'DD/MM/YYYY':
+      return `${dd}/${mm}/${yyyy}`;
+    case 'YYYY-MM-DD':
+      return `${yyyy}-${mm}-${dd}`;
+    case 'MMM D, YYYY':
+      return `${monthShort} ${date.getDate()}, ${yyyy}`;
+    default:
+      return date.toLocaleDateString();
+  }
+}
+
+const LS_KEYS = {
+  density: 'veridoc:settings:density',
+  landingTab: 'veridoc:settings:landing-tab',
+  timezone: 'veridoc:settings:timezone',
+  dateFormat: 'veridoc:settings:date-format',
+} as const;
+
+function readLocal(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocal(key: string, value: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // localStorage disabled (private mode) — preference just won't persist.
+  }
+}
+
+function Placeholder({
+  icon: Icon,
+  title,
+  description,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="py-14 text-center space-y-2">
+      <Icon className="w-8 h-8 mx-auto text-text-muted" aria-hidden />
+      <h3 className="font-display text-h3 font-semibold text-text-primary">{title}</h3>
+      <p className="text-body text-text-muted max-w-md mx-auto">{description}</p>
+      <span className="badge-info inline-flex mt-2">Coming soon</span>
+    </div>
+  );
+}
+
+function FieldRow({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-6 py-4">
+      <div className="sm:w-48 shrink-0">
+        <p className="text-body text-text-primary font-medium">{label}</p>
+        {hint && <p className="text-small text-text-muted mt-0.5">{hint}</p>}
+      </div>
+      <div className="flex-1">{children}</div>
+    </div>
+  );
+}
+
+const THEME_CHOICES: { value: ThemeChoice; label: string; icon: ComponentType<{ className?: string }> }[] = [
+  { value: 'light', label: 'Light', icon: Sun },
+  { value: 'dark', label: 'Dark', icon: Moon },
+  { value: 'system', label: 'System', icon: Monitor },
+];
 
 export default function SettingsPage() {
-  const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState<SettingsTab>('display');
+  const { user } = useAuth();
+  const { theme, setTheme } = useTheme();
 
-  // Profile settings
-  const [profile, setProfile] = useState({
-    name: 'Admin User',
-    email: 'admin@example.com',
-    role: 'Administrator',
-  });
+  const [density, setDensity] = useState<Density>('comfortable');
+  const [landingTab, setLandingTab] = useState(LANDING_TAB_OPTIONS[0]?.href ?? '/dashboard');
+  const [timezone, setTimezone] = useState('UTC');
+  const [dateFormat, setDateFormat] = useState<DateFormat>('MM/DD/YYYY');
+  const [hydrated, setHydrated] = useState(false);
 
-  // Processing settings
-  const [processing, setProcessing] = useState({
-    defaultSchema: '',
-    defaultExportFormat: 'json',
-    defaultPriority: 'normal',
-    autoMaskPhi: true,
-    maxConcurrentTasks: '5',
-    retryAttempts: '3',
-  });
+  // Hydrate from localStorage once mounted (SSR-safe — avoids hydration mismatch).
+  useEffect(() => {
+    const storedDensity = readLocal(LS_KEYS.density);
+    if (storedDensity === 'comfortable' || storedDensity === 'compact') setDensity(storedDensity);
 
-  // Notification settings
-  const [notifications, setNotifications] = useState({
-    emailOnComplete: true,
-    emailOnFail: true,
-    slackWebhook: '',
-    webhookUrl: '',
-  });
+    const storedLanding = readLocal(LS_KEYS.landingTab);
+    if (storedLanding) setLandingTab(storedLanding);
 
-  const handleSave = async () => {
-    setSaving(true);
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    setSaving(false);
-    toast.success('Settings saved successfully');
+    const storedTz = readLocal(LS_KEYS.timezone);
+    if (storedTz) setTimezone(storedTz);
+    else if (typeof Intl !== 'undefined') {
+      try {
+        const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (detected) setTimezone(detected);
+      } catch {
+        // keep default
+      }
+    }
+
+    const storedFmt = readLocal(LS_KEYS.dateFormat);
+    if (storedFmt) setDateFormat(storedFmt as DateFormat);
+
+    setHydrated(true);
+  }, []);
+
+  const handleDensity = (next: Density) => {
+    setDensity(next);
+    writeLocal(LS_KEYS.density, next);
+  };
+  const handleLandingTab = (next: string) => {
+    setLandingTab(next);
+    writeLocal(LS_KEYS.landingTab, next);
+  };
+  const handleTimezone = (next: string) => {
+    setTimezone(next);
+    writeLocal(LS_KEYS.timezone, next);
+  };
+  const handleDateFormat = (next: DateFormat) => {
+    setDateFormat(next);
+    writeLocal(LS_KEYS.dateFormat, next);
   };
 
-  const exportFormatOptions: SelectOption[] = [
-    { value: 'json', label: 'JSON' },
-    { value: 'excel', label: 'Excel' },
-    { value: 'markdown', label: 'Markdown' },
-    { value: 'both', label: 'JSON + Excel' },
-    { value: 'all', label: 'All Formats' },
-  ];
-
-  const priorityOptions: SelectOption[] = [
-    { value: 'low', label: 'Low' },
-    { value: 'normal', label: 'Normal' },
-    { value: 'high', label: 'High' },
-  ];
+  const initials = (user?.username ?? 'VD').slice(0, 2).toUpperCase();
+  const now = new Date();
 
   return (
     <AppLayout>
-      <div className="max-w-4xl mx-auto space-y-6">
-        {/* Page Header */}
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-        >
-          <h1 className="text-2xl font-bold text-surface-900">Settings</h1>
-          <p className="text-surface-500 mt-1">
-            Configure your document extraction system
-          </p>
-        </motion.div>
+      <div className="space-y-6">
+        <p className="text-body text-text-secondary max-w-2xl">
+          Personal preferences for this account. Display settings are saved on this device;
+          the other tabs are on the roadmap.
+        </p>
 
-        {/* Settings Tabs */}
-        <Card variant="elevated" padding="none">
-          <Tabs defaultValue="profile">
-            <div className="px-6 pt-6 border-b border-surface-100">
-              <TabsList>
-                <TabsTrigger value="profile" icon={<User className="w-4 h-4" />}>
-                  Profile
-                </TabsTrigger>
-                <TabsTrigger value="processing" icon={<Server className="w-4 h-4" />}>
-                  Processing
-                </TabsTrigger>
-                <TabsTrigger value="notifications" icon={<Bell className="w-4 h-4" />}>
-                  Notifications
-                </TabsTrigger>
-                <TabsTrigger value="security" icon={<Shield className="w-4 h-4" />}>
-                  Security
-                </TabsTrigger>
-              </TabsList>
-            </div>
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+          {/* Left tab nav */}
+          <nav className="lg:col-span-1 card p-2 h-fit">
+            <ul className="space-y-0.5">
+              {TABS.map((t) => {
+                const Icon = t.icon;
+                const active = tab === t.id;
+                return (
+                  <li key={t.id}>
+                    <button
+                      onClick={() => setTab(t.id)}
+                      className={cn(active ? 'nav-item-active' : 'nav-item', 'w-full')}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      <Icon className="w-4 h-4 shrink-0" aria-hidden />
+                      <span className="truncate">{t.label}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </nav>
 
-            <div className="p-6">
-              {/* Profile Settings */}
-              <TabsContent value="profile">
-                <div className="space-y-6">
-                  <div>
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      Profile Information
-                    </h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <Input
-                        label="Full Name"
-                        value={profile.name}
-                        onChange={(e) =>
-                          setProfile({ ...profile, name: e.target.value })
-                        }
-                      />
-                      <Input
-                        label="Email Address"
-                        type="email"
-                        value={profile.email}
-                        onChange={(e) =>
-                          setProfile({ ...profile, email: e.target.value })
-                        }
-                      />
-                      <Input
-                        label="Role"
-                        value={profile.role}
-                        disabled
-                        hint="Contact admin to change role"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="pt-6 border-t border-surface-100">
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      Change Password
-                    </h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <Input
-                        label="Current Password"
-                        type="password"
-                        placeholder="Enter current password"
-                      />
-                      <div />
-                      <Input
-                        label="New Password"
-                        type="password"
-                        placeholder="Enter new password"
-                      />
-                      <Input
-                        label="Confirm Password"
-                        type="password"
-                        placeholder="Confirm new password"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </TabsContent>
-
-              {/* Processing Settings */}
-              <TabsContent value="processing">
-                <div className="space-y-6">
-                  <div>
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      Default Processing Options
-                    </h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <Select
-                        label="Default Export Format"
-                        options={exportFormatOptions}
-                        value={processing.defaultExportFormat}
-                        onChange={(v) =>
-                          setProcessing({ ...processing, defaultExportFormat: v })
-                        }
-                      />
-                      <Select
-                        label="Default Priority"
-                        options={priorityOptions}
-                        value={processing.defaultPriority}
-                        onChange={(v) =>
-                          setProcessing({ ...processing, defaultPriority: v })
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <div className="pt-6 border-t border-surface-100">
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      System Settings
-                    </h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <Input
-                        label="Max Concurrent Tasks"
-                        type="number"
-                        value={processing.maxConcurrentTasks}
-                        onChange={(e) =>
-                          setProcessing({
-                            ...processing,
-                            maxConcurrentTasks: e.target.value,
-                          })
-                        }
-                        hint="Maximum number of concurrent processing tasks"
-                      />
-                      <Input
-                        label="Retry Attempts"
-                        type="number"
-                        value={processing.retryAttempts}
-                        onChange={(e) =>
-                          setProcessing({
-                            ...processing,
-                            retryAttempts: e.target.value,
-                          })
-                        }
-                        hint="Number of retry attempts on failure"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="pt-6 border-t border-surface-100">
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      Privacy & Compliance
-                    </h3>
-                    <div className="flex items-center justify-between p-4 bg-surface-50 rounded-xl">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-lg bg-success-100 flex items-center justify-center">
-                          <Shield className="w-5 h-5 text-success-600" />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-surface-900">
-                            Auto-mask PHI by default
-                          </p>
-                          <p className="text-xs text-surface-500">
-                            Automatically mask sensitive health information
-                          </p>
-                        </div>
-                      </div>
-                      <label className="relative inline-flex items-center cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={processing.autoMaskPhi}
-                          onChange={(e) =>
-                            setProcessing({
-                              ...processing,
-                              autoMaskPhi: e.target.checked,
-                            })
-                          }
-                          className="sr-only peer"
-                        />
-                        <div className="w-11 h-6 bg-surface-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-surface-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600" />
-                      </label>
-                    </div>
-                  </div>
-                </div>
-              </TabsContent>
-
-              {/* Notification Settings */}
-              <TabsContent value="notifications">
-                <div className="space-y-6">
-                  <div>
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      Email Notifications
-                    </h3>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between p-4 bg-surface-50 rounded-xl">
-                        <div>
-                          <p className="text-sm font-medium text-surface-900">
-                            Email on task completion
-                          </p>
-                          <p className="text-xs text-surface-500">
-                            Receive email when processing completes
-                          </p>
-                        </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={notifications.emailOnComplete}
-                            onChange={(e) =>
-                              setNotifications({
-                                ...notifications,
-                                emailOnComplete: e.target.checked,
-                              })
-                            }
-                            className="sr-only peer"
-                          />
-                          <div className="w-11 h-6 bg-surface-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-surface-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600" />
-                        </label>
-                      </div>
-                      <div className="flex items-center justify-between p-4 bg-surface-50 rounded-xl">
-                        <div>
-                          <p className="text-sm font-medium text-surface-900">
-                            Email on task failure
-                          </p>
-                          <p className="text-xs text-surface-500">
-                            Receive email when processing fails
-                          </p>
-                        </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={notifications.emailOnFail}
-                            onChange={(e) =>
-                              setNotifications({
-                                ...notifications,
-                                emailOnFail: e.target.checked,
-                              })
-                            }
-                            className="sr-only peer"
-                          />
-                          <div className="w-11 h-6 bg-surface-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-surface-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600" />
-                        </label>
+          {/* Tab content */}
+          <div className="lg:col-span-4 card p-6">
+            {tab === 'profile' && (
+              <div>
+                <h2 className="text-h3 font-display font-semibold text-text-primary mb-4">Profile</h2>
+                {user ? (
+                  <div className="flex items-center gap-4 p-4 rounded-xl glass-hairline">
+                    <span
+                      className="grid place-items-center w-12 h-12 rounded-full text-body font-semibold text-accent-brand shrink-0"
+                      style={{ background: 'rgb(var(--accent-brand-rgb) / 0.14)' }}
+                    >
+                      {initials}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-body text-text-primary font-medium truncate">{user.username}</p>
+                      <p className="text-small text-text-muted truncate">{user.email}</p>
+                      <div className="flex flex-wrap gap-1.5 mt-1.5">
+                        {user.roles.map((r) => (
+                          <span key={r} className="badge-primary">{r}</span>
+                        ))}
                       </div>
                     </div>
                   </div>
-
-                  <div className="pt-6 border-t border-surface-100">
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      Integrations
-                    </h3>
-                    <div className="space-y-4">
-                      <Input
-                        label="Slack Webhook URL"
-                        value={notifications.slackWebhook}
-                        onChange={(e) =>
-                          setNotifications({
-                            ...notifications,
-                            slackWebhook: e.target.value,
-                          })
-                        }
-                        placeholder="https://hooks.slack.com/services/..."
-                        hint="Send notifications to Slack channel"
-                      />
-                      <Input
-                        label="Custom Webhook URL"
-                        value={notifications.webhookUrl}
-                        onChange={(e) =>
-                          setNotifications({
-                            ...notifications,
-                            webhookUrl: e.target.value,
-                          })
-                        }
-                        placeholder="https://your-server.com/webhook"
-                        hint="POST notifications to custom endpoint"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </TabsContent>
-
-              {/* Security Settings */}
-              <TabsContent value="security">
-                <div className="space-y-6">
-                  <div>
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      API Keys
-                    </h3>
-                    <div className="p-4 bg-surface-50 rounded-xl">
-                      <div className="flex items-center justify-between mb-4">
-                        <div className="flex items-center gap-3">
-                          <Key className="w-5 h-5 text-surface-600" />
-                          <div>
-                            <p className="text-sm font-medium text-surface-900">
-                              API Key
-                            </p>
-                            <p className="text-xs text-surface-500">
-                              Used for programmatic access
-                            </p>
-                          </div>
-                        </div>
-                        <Button variant="secondary" size="sm">
-                          Regenerate
-                        </Button>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          value="sk-••••••••••••••••••••••••••••••••"
-                          disabled
-                          className="font-mono text-sm"
-                        />
-                        <Button variant="secondary" size="sm">
-                          Copy
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="pt-6 border-t border-surface-100">
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      Session Management
-                    </h3>
-                    <div className="flex items-center justify-between p-4 bg-surface-50 rounded-xl">
-                      <div>
-                        <p className="text-sm font-medium text-surface-900">
-                          Session Timeout
-                        </p>
-                        <p className="text-xs text-surface-500">
-                          Automatically log out after inactivity
-                        </p>
-                      </div>
-                      <Select
-                        options={[
-                          { value: '15', label: '15 minutes' },
-                          { value: '30', label: '30 minutes' },
-                          { value: '60', label: '1 hour' },
-                          { value: '120', label: '2 hours' },
-                          { value: '0', label: 'Never' },
-                        ]}
-                        value="30"
-                        onChange={() => {}}
-                        className="w-40"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="pt-6 border-t border-surface-100">
-                    <h3 className="text-lg font-medium text-surface-900 mb-4">
-                      Danger Zone
-                    </h3>
-                    <div className="p-4 border border-error-200 bg-error-50 rounded-xl">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="text-sm font-medium text-error-900">
-                            Delete Account
-                          </p>
-                          <p className="text-xs text-error-700">
-                            Permanently delete your account and all data
-                          </p>
-                        </div>
-                        <Button variant="danger" size="sm">
-                          Delete Account
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </TabsContent>
-            </div>
-
-            {/* Save Button */}
-            <div className="px-6 py-4 border-t border-surface-100 bg-surface-50 rounded-b-2xl">
-              <div className="flex items-center justify-end gap-3">
-                <Button variant="secondary">Cancel</Button>
-                <Button
-                  variant="primary"
-                  onClick={handleSave}
-                  loading={saving}
-                  leftIcon={<Save className="w-4 h-4" />}
-                >
-                  Save Changes
-                </Button>
+                ) : (
+                  <div className="py-10 text-center text-body text-text-muted">Not signed in.</div>
+                )}
+                <p className="text-small text-text-muted mt-4">
+                  Editable profile fields (display name, avatar, password) are on the roadmap.
+                </p>
+                <span className="badge-info inline-flex mt-2">Coming soon</span>
               </div>
-            </div>
-          </Tabs>
-        </Card>
+            )}
+
+            {tab === 'display' && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <h2 className="text-h3 font-display font-semibold text-text-primary">Display</h2>
+                  <span className="badge-success">
+                    <Check className="w-3 h-3" aria-hidden />
+                    saved on this device
+                  </span>
+                </div>
+                <p className="text-small text-text-muted mb-2">
+                  These preferences persist to this browser only — there&apos;s no settings
+                  endpoint yet, so nothing is sent to the server.
+                </p>
+                <div className="divide-y divide-border-default">
+                  <FieldRow label="Theme" hint="Light, dark, or match your system.">
+                    <div className="inline-flex rounded-xl glass-hairline p-1 gap-1">
+                      {THEME_CHOICES.map((choice) => {
+                        const Icon = choice.icon;
+                        const active = theme === choice.value;
+                        return (
+                          <button
+                            key={choice.value}
+                            onClick={() => setTheme(choice.value)}
+                            className={cn(
+                              'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-small transition-colors duration-fast',
+                              active ? 'text-text-primary' : 'text-text-secondary hover:text-text-primary',
+                            )}
+                            style={active ? { background: 'rgb(var(--accent-brand-rgb) / 0.14)' } : undefined}
+                            aria-pressed={active}
+                          >
+                            <Icon className="w-3.5 h-3.5" aria-hidden />
+                            {choice.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </FieldRow>
+
+                  <FieldRow label="Density" hint="Comfortable spacing or a tighter, compact layout.">
+                    <div className="inline-flex rounded-xl glass-hairline p-1 gap-1">
+                      {(['comfortable', 'compact'] as Density[]).map((d) => {
+                        const active = density === d;
+                        return (
+                          <button
+                            key={d}
+                            onClick={() => handleDensity(d)}
+                            className={cn(
+                              'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-small capitalize transition-colors duration-fast',
+                              active ? 'text-text-primary' : 'text-text-secondary hover:text-text-primary',
+                            )}
+                            style={active ? { background: 'rgb(var(--accent-brand-rgb) / 0.14)' } : undefined}
+                            aria-pressed={active}
+                          >
+                            <LayoutPanelLeft className="w-3.5 h-3.5" aria-hidden />
+                            {d}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </FieldRow>
+
+                  <FieldRow label="Default landing tab" hint="Where you land right after sign-in.">
+                    <select
+                      value={landingTab}
+                      onChange={(e) => handleLandingTab(e.target.value)}
+                      className="input max-w-xs"
+                    >
+                      {LANDING_TAB_OPTIONS.map((item) => (
+                        <option key={item.href} value={item.href}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </FieldRow>
+
+                  <FieldRow label="Timezone" hint="Used to render timestamps across the app.">
+                    <select
+                      value={timezone}
+                      onChange={(e) => handleTimezone(e.target.value)}
+                      className="input max-w-xs"
+                    >
+                      {!TIMEZONE_OPTIONS.includes(timezone) && (
+                        <option value={timezone}>{timezone} (detected)</option>
+                      )}
+                      {TIMEZONE_OPTIONS.map((tz) => (
+                        <option key={tz} value={tz}>
+                          {tz}
+                        </option>
+                      ))}
+                    </select>
+                  </FieldRow>
+
+                  <FieldRow label="Date format" hint={`Preview: ${formatWithPattern(now, dateFormat)}`}>
+                    <select
+                      value={dateFormat}
+                      onChange={(e) => handleDateFormat(e.target.value as DateFormat)}
+                      className="input max-w-xs"
+                    >
+                      {DATE_FORMAT_OPTIONS.map((fmt) => (
+                        <option key={fmt} value={fmt}>
+                          {fmt}
+                        </option>
+                      ))}
+                    </select>
+                  </FieldRow>
+                </div>
+                {!hydrated && <p className="sr-only">Loading saved preferences…</p>}
+              </div>
+            )}
+
+            {tab === 'notifications' && (
+              <Placeholder
+                icon={SettingsIcon}
+                title="Notifications"
+                description="Email and webhook alerts for extraction completion, HITL review, and failures will live here."
+              />
+            )}
+
+            {tab === 'integrations' && (
+              <Placeholder
+                icon={Blocks}
+                title="API & Integrations"
+                description="Manage API keys, webhooks, and outbound integrations. See the API keys and Webhooks pages for what's already live."
+              />
+            )}
+
+            {tab === 'tenant' && (
+              <Placeholder
+                icon={Building2}
+                title="Tenant"
+                description="Tenant-wide defaults — PHI enforcement, data retention, and branding — will be configurable here."
+              />
+            )}
+
+            {tab === 'advanced' && (
+              <Placeholder
+                icon={Wrench}
+                title="Advanced"
+                description="Extraction engine overrides, feature flags, and diagnostics for power users."
+              />
+            )}
+          </div>
+        </div>
       </div>
     </AppLayout>
   );
